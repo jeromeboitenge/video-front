@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { AudioLines, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { formatTime, makeProject, parseProjectDocument, type MediaAsset, type ProjectDocument, type TimelineClip, type ToolId } from './model';
 import { effectRegistry, effectStyle, type AppliedEffect, type EffectId } from './effects';
+import { renderProjectVideo } from './export';
 import { authenticate, getCloudMediaContent, getCloudProject, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';
 import { readMedia, storeMedia } from './mediaStore';
+import './export.css';
 
 const tools: { id: ToolId; label: string; icon: typeof Film }[] = [
   { id: 'media', label: 'Media', icon: Film }, { id: 'audio', label: 'Audio', icon: AudioLines }, { id: 'text', label: 'Text', icon: Type },
@@ -46,12 +48,17 @@ export default function App() {
   const [openingCloudProjectId, setOpeningCloudProjectId] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportError, setExportError] = useState('');
   const [localProjects, setLocalProjects] = useState<{ id: string; name: string; updatedAt: string }[]>(() => { try { return JSON.parse(localStorage.getItem('frameforge:projects-index') ?? '[]'); } catch { return []; } });
   const fileRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const mediaUrlMap = useRef<Record<string, string>>({});
   const undoStack = useRef<ProjectDocument[]>([]);
   const redoStack = useRef<ProjectDocument[]>([]);
+  const exportAbort = useRef<AbortController | null>(null);
   const [saved, setSaved] = useState(true);
   const lastClipEnd = project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
   const duration = Math.max(24, Math.ceil(lastClipEnd / 12) * 12);
@@ -303,7 +310,43 @@ export default function App() {
     if (name) commit({ ...project, project: { ...project.project, name: name.slice(0, 120) } });
     setProjectMenuOpen(false);
   }
-  function exportProject() { const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${project.project.name.toLowerCase().replaceAll(' ', '-')}.frameforge.json`; anchor.click(); URL.revokeObjectURL(url); setNotice('Project document exported. Video rendering will arrive with the export pipeline.'); }
+  function downloadExport(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function exportFilename(extension: string) {
+    const safeName = project.project.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'frameforge-project';
+    return `${safeName}.${extension}`;
+  }
+  function downloadProjectFile() {
+    downloadExport(new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' }), exportFilename('frameforge.json'));
+    setNotice('Editable project file downloaded.');
+  }
+  async function startVideoExport() {
+    const controller = new AbortController();
+    exportAbort.current = controller;
+    setExporting(true);
+    setExportProgress(0);
+    setExportError('');
+    try {
+      const blob = await renderProjectVideo(project, setExportProgress, controller.signal);
+      downloadExport(blob, exportFilename('webm'));
+      setExportOpen(false);
+      setNotice('Rendered video downloaded as WebM.');
+    } catch (error) {
+      if (controller.signal.aborted) setExportError('Export cancelled.');
+      else setExportError((error as Error).message);
+    } finally {
+      if (exportAbort.current === controller) exportAbort.current = null;
+      setExporting(false);
+    }
+  }
 
   const toolTitle: Record<ToolId, string> = { media: 'Project media', audio: 'Audio library', text: 'Typography', captions: 'Captions', elements: 'Elements', effects: 'Effects', transitions: 'Transitions', ai: 'AI studio' };
 
@@ -327,7 +370,7 @@ export default function App() {
         </div>}
         <span className={`save-indicator ${saved ? '' : 'unsaved'}`}><Cloud size={13}/>{saved ? 'All changes saved' : 'Unsaved changes'}</span>
       </div>
-      <div className="top-actions"><button className="icon-button" title="Undo · Ctrl Z" onClick={undo}><Undo2 size={16}/></button><button className="icon-button" title="Redo · Ctrl Shift Z" onClick={redo}><Redo2 size={16}/></button><span className="top-divider"/><button className="icon-button" title="Help"><CircleHelp size={16}/></button><button className="avatar" aria-label="Account" onClick={() => { setAuthError(''); setAccountOpen(true); }}>{currentUser ? currentUser.email.slice(0, 1).toUpperCase() : 'A'}</button><button className="export-button" onClick={exportProject}><Download size={15}/>Export</button></div>
+      <div className="top-actions"><button className="icon-button" title="Undo · Ctrl Z" onClick={undo}><Undo2 size={16}/></button><button className="icon-button" title="Redo · Ctrl Shift Z" onClick={redo}><Redo2 size={16}/></button><span className="top-divider"/><button className="icon-button" title="Help"><CircleHelp size={16}/></button><button className="avatar" aria-label="Account" onClick={() => { setAuthError(''); setAccountOpen(true); }}>{currentUser ? currentUser.email.slice(0, 1).toUpperCase() : 'A'}</button><button className="export-button" onClick={() => { setExportError(''); setExportOpen(true); }}><Download size={15}/>Export</button></div>
     </header>
     <section className="workspace">
       <nav className="tool-rail" aria-label="Creative tools">
@@ -384,6 +427,7 @@ export default function App() {
       <aside className="inspector"><div className="inspector-head"><span className="eyebrow">PROPERTIES</span><button className="icon-button subtle"><MoreHorizontal size={17}/></button></div><div className="inspector-content"><div className="selection-card"><div className="selection-icon"><Frame size={17}/></div><div><strong>Canvas settings</strong><span>Portrait composition</span></div><ChevronDown size={14}/></div><section className="inspector-section"><div className="section-title"><span>FORMAT</span><button className="icon-button subtle"><MoreHorizontal size={15}/></button></div><div className="format-preview"><div className="format-portrait"><span/></div><div className="format-copy"><strong>Portrait 9:16</strong><span>Social video</span><button>Change format <ChevronDown size={12}/></button></div></div><div className="dimension-row"><label>Width<div><input value={project.canvas.width} readOnly/><span>px</span></div></label><span className="dimension-link">↔</span><label>Height<div><input value={project.canvas.height} readOnly/><span>px</span></div></label></div><label className="inspector-select-label">Frame rate<button>{project.canvas.fps} fps <ChevronDown size={13}/></button></label></section><section className="inspector-section"><div className="section-title"><span>CANVAS</span></div><div className="inspector-property"><span>Background</span><button className="color-picker"><i style={{ background: project.canvas.background }}/><span>{project.canvas.background}</span><ChevronDown size={12}/></button></div><div className="inspector-property"><span>Safe margins</span><button className="switch on"><i/></button></div><div className="inspector-property"><span>Background fill</span><button className="switch"><i/></button></div></section><section className="inspector-section layer-summary"><div className="section-title"><span>LAYERS</span><button className="icon-button subtle"><Plus size={15}/></button></div>{project.tracks.map((track) => <div className="layer-row" key={track.id}><span className="track-color" style={{ background: track.color }}/><span>{track.name}</span><button title="Lock layer"><LockKeyhole size={12}/></button></div>)}</section><div className="inspector-tip"><Sparkles size={14}/><span>Select a layer or clip to see its editing controls here.</span></div></div><div className="inspector-bottom"><button><CircleHelp size={14}/>Inspector guide</button><span>⌘ /</span></div></aside>
     </section>
     <footer className="statusbar"><div><span className="status-online"/>Workspace ready</div><span>Frameforge Studio <i>·</i> Draft 1.0</span><button onClick={() => setNotice('Keyboard shortcuts: Space play/pause · ⌘Z undo · ⌘⇧Z redo · ⌘S save')}><CircleHelp size={13}/>Shortcuts</button></footer>
+    {exportOpen && <div className="export-backdrop" role="presentation" onMouseDown={(event) => { if (!exporting && event.target === event.currentTarget) setExportOpen(false); }}><section className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title"><button className="modal-close" aria-label="Close export" disabled={exporting} onClick={() => setExportOpen(false)}>×</button><div className="modal-mark"><Download size={18}/></div><span className="eyebrow">LOCAL EXPORT</span><h2 id="export-title">Export your project</h2><p className="modal-description">Render the timeline to a WebM video in your browser, or download the editable project document.</p><button className="modal-submit" onClick={() => void startVideoExport()} disabled={exporting}>{exporting ? `Rendering video · ${Math.round(exportProgress * 100)}%` : 'Render video (.webm)'}</button><button className="modal-secondary" onClick={downloadProjectFile} disabled={exporting}>Download editable project (.frameforge.json)</button>{exporting && <div className="export-progress" aria-label="Export progress"><div><i style={{ width: `${Math.round(exportProgress * 100)}%` }}/></div><span>{Math.round(exportProgress * 100)}%</span><button className="modal-secondary" onClick={() => exportAbort.current?.abort()}>Cancel render</button></div>}{exportError && <p className="export-error" role="alert">{exportError}</p>}<p className="export-note">Video exports run in real time and include timeline video, image, audio clips, and supported preview effects. Text, transitions, and other unfinished tools are not included yet.</p></section></div>}
     {accountOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAccountOpen(false); }}><section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="account-title"><button className="modal-close" aria-label="Close" onClick={() => setAccountOpen(false)}>×</button><div className="modal-mark"><Clapperboard size={18}/></div><span className="eyebrow">FRAMEFORGE ACCOUNT</span><h2 id="account-title">{currentUser ? 'Your workspace' : authMode === 'login' ? 'Welcome back' : 'Create your account'}</h2>{currentUser ? <><p className="modal-description">Signed in as <strong>{currentUser.email}</strong>. Your project can sync to your account.</p><button className="modal-submit" onClick={saveDraft}>Sync this project</button><button className="modal-secondary" onClick={signOut}>Sign out</button></> : <form onSubmit={submitAuth}><p className="modal-description">Sign in to sync your project. Your local draft stays on this device.</p><label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} required minLength={10} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 10 characters"/></label>{authError && <p className="auth-error" role="alert">{authError}</p>}<button className="modal-submit" disabled={authBusy}>{authBusy ? 'Connecting…' : authMode === 'login' ? 'Sign in and sync' : 'Create account'}</button><button type="button" className="modal-secondary" onClick={() => { setAuthError(''); setAuthMode(authMode === 'login' ? 'register' : 'login'); }}>{authMode === 'login' ? 'New to Frameforge? Create account' : 'Already have an account? Sign in'}</button></form>}</section></div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button onClick={() => setNotice('')}>Dismiss</button></div>}
   </main>;

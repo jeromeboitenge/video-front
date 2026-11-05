@@ -1,0 +1,14 @@
+.export-backdrop{position:fixed;inset:0;z-index:30;display:grid;place-items:center;padding:24px;background:rgba(5,6,9,.72);backdrop-filter:blur(8px)}
+.export-modal{position:relative;width:min(460px,100%);padding:30px;border:1px solid #34343b;border-radius:14px;background:#191a1e;box-shadow:0 24px 80px #0009}
+.export-modal h2{margin:12px 0 8px;font-size:23px}
+.export-modal .modal-description{margin:0 0 20px;color:#a5a5ad;font-size:13px;line-height:1.6}
+.export-modal .modal-submit,.export-modal .modal-secondary{width:100%;margin-top:9px}
+.export-modal .modal-submit:disabled,.export-modal .modal-secondary:disabled{opacity:.55;cursor:not-allowed}
+.export-modal .modal-close{position:absolute;top:14px;right:14px}
+.export-progress{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;margin-top:18px}
+.export-progress>div{height:6px;overflow:hidden;border-radius:6px;background:#2c2d33}
+.export-progress>div i{display:block;height:100%;border-radius:6px;background:#a886ff;transition:width .15s linear}
+.export-progress>span{min-width:40px;color:#c5b6ff;text-align:right;font-size:12px}
+.export-progress .modal-secondary{grid-column:1/-1}
+.export-error{margin:14px 0 0;color:#ff9d9d;font-size:13px;line-height:1.5}
+.export-note{margin:18px 0 0;color:#85858e;font-size:11px;line-height:1.6}

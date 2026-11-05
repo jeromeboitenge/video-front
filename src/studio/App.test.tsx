@@ -3,11 +3,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import App from './App';
 import { readMedia, storeMedia } from './mediaStore';
 import { makeProject, parseProjectDocument } from './model';
+import { renderProjectVideo } from './export';
 
 vi.mock('./mediaStore', () => ({
   storeMedia: vi.fn().mockResolvedValue(undefined),
   readMedia: vi.fn().mockResolvedValue(undefined),
 }));
+vi.mock('./export', () => ({ renderProjectVideo: vi.fn() }));
 
 describe('editor media and timeline flow', () => {
   it('loads project documents created before effects were introduced', () => {
@@ -15,9 +17,33 @@ describe('editor media and timeline flow', () => {
     expect(parseProjectDocument(legacyDocument).effects).toEqual([]);
   });
 
+  it('starts a rendered video export and reports completion', async () => {
+    const project = makeProject();
+    project.assets = [{ id: 'asset-1', name: 'scene.png', kind: 'image', mimeType: 'image/png', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 2, sourceOffset: 0 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+    vi.mocked(renderProjectVideo).mockImplementation(async (_document, onProgress) => {
+      onProgress(0.5);
+      return new Blob(['rendered'], { type: 'video/webm' });
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /^Export$/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Render video (.webm)' }));
+
+    await screen.findByText('Rendered video downloaded as WebM.');
+    expect(renderProjectVideo).toHaveBeenCalledWith(
+      expect.objectContaining({ clips: [expect.objectContaining({ id: 'clip-1' })] }),
+      expect.any(Function),
+      expect.any(AbortSignal),
+    );
+  });
+
   beforeEach(() => {
     vi.mocked(storeMedia).mockResolvedValue(undefined);
     vi.mocked(readMedia).mockResolvedValue(undefined);
+    vi.mocked(renderProjectVideo).mockResolvedValue(new Blob(['rendered'], { type: 'video/webm' }));
     localStorage.clear();
     sessionStorage.clear();
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:frameforge-test') });

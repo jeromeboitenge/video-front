@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { AudioLines, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
-import { formatTime, makeProject, parseProjectDocument, type MediaAsset, type ProjectDocument, type TimelineClip, type ToolId } from './model';
+import { clipOpacityAt, formatTime, makeProject, parseProjectDocument, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId } from './model';
 import { effectRegistry, effectStyle, type AppliedEffect, type EffectId } from './effects';
 import { renderProjectVideo } from './export';
 import { authenticate, getCloudMediaContent, getCloudProject, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';
 import { readMedia, storeMedia } from './mediaStore';
+import { CreativeToolsPanel } from './CreativeToolsPanel';
 import './export.css';
 
 const tools: { id: ToolId; label: string; icon: typeof Film }[] = [
@@ -21,10 +22,12 @@ type TimelinePreviewItem = {
   trackIndex: number;
 };
 
-function TimelineComposition({ items, mediaUrls, effects, onMediaElement, onMediaMetadata }: {
+function TimelineComposition({ items, mediaUrls, effects, overlays, playhead, onMediaElement, onMediaMetadata }: {
   items: TimelinePreviewItem[];
   mediaUrls: Record<string, string>;
   effects: AppliedEffect[];
+  overlays: TextOverlay[];
+  playhead: number;
   onMediaElement: (clipId: string, element: HTMLMediaElement | null) => void;
   onMediaMetadata: (clipId: string, duration: number) => void;
 }) {
@@ -33,7 +36,7 @@ function TimelineComposition({ items, mediaUrls, effects, onMediaElement, onMedi
     {visuals.map(({ clip, asset }) => {
       const url = mediaUrls[asset.id];
       const style = effectStyle(effects, asset.id);
-      return <div className="timeline-composition-layer" key={clip.id} data-clip-id={clip.id} aria-label={asset.name}>
+      return <div className="timeline-composition-layer" key={clip.id} data-clip-id={clip.id} aria-label={asset.name} style={{ opacity: clipOpacityAt(clip, playhead) }}>
         {url && asset.kind === 'video' && <video ref={(element) => onMediaElement(clip.id, element)} src={url} style={{ filter: style.filter }} playsInline preload="auto" muted onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/>}
         {url && asset.kind === 'image' && <img src={url} alt={asset.name} style={{ filter: style.filter }}/>}
         {!url && <div className="timeline-media-unavailable">{asset.name}</div>}
@@ -41,6 +44,7 @@ function TimelineComposition({ items, mediaUrls, effects, onMediaElement, onMedi
       </div>;
     })}
     {!visuals.length && <div className="timeline-composition-empty">No visual clip at this time</div>}
+    {overlays.filter((overlay) => playhead >= overlay.start && playhead < overlay.start + overlay.duration).map((overlay) => <div key={overlay.id} className={`timeline-text-overlay ${overlay.kind} position-${overlay.position}`} style={{ color: overlay.color, fontSize: `${Math.max(12, overlay.fontSize * 0.28)}px` }}>{overlay.text}</div>)}
     {items.filter(({ track, asset }) => track.kind === 'audio' && (asset.kind === 'audio' || asset.kind === 'video')).map(({ clip, asset }) => {
       const url = mediaUrls[asset.id];
       return url ? <audio key={clip.id} ref={(element) => onMediaElement(clip.id, element)} src={url} preload="auto" onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/> : null;
@@ -97,11 +101,14 @@ export default function App() {
   const redoStack = useRef<ProjectDocument[]>([]);
   const exportAbort = useRef<AbortController | null>(null);
   const [saved, setSaved] = useState(true);
-  const lastClipEnd = project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
+  const lastClipEnd = Math.max(
+    project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0),
+    project.textOverlays.reduce((end, overlay) => Math.max(end, overlay.start + overlay.duration), 0),
+  );
   const duration = Math.max(24, Math.ceil(lastClipEnd / 12) * 12);
   const selectedAsset = project.assets.find((asset) => asset.id === selectedAssetId);
   const selectedClip = project.clips.find((clip) => clip.id === selectedClipId);
-  const sequenceDuration = project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
+  const sequenceDuration = lastClipEnd;
   const activeTimelineItems = useMemo(() => {
     const assets = new Map(project.assets.map((asset) => [asset.id, asset]));
     const tracks = new Map(project.tracks.map((track, trackIndex) => [track.id, { track, trackIndex }]));
@@ -261,9 +268,9 @@ export default function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); }
       else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveDraft(); }
       else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') { event.preventDefault(); duplicateSelectedClip(); }
-      else if (event.code === 'Space' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) { event.preventDefault(); togglePlayback(); }
-      else if (event.key.toLowerCase() === 's' && !(event.target instanceof HTMLInputElement)) splitSelectedClip();
-      else if ((event.key === 'Delete' || event.key === 'Backspace') && !(event.target instanceof HTMLInputElement)) deleteSelectedClip();
+      else if (event.code === 'Space' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) { event.preventDefault(); togglePlayback(); }
+      else if (event.key.toLowerCase() === 's' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) splitSelectedClip();
+      else if ((event.key === 'Delete' || event.key === 'Backspace') && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) deleteSelectedClip();
     };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
   });
@@ -288,8 +295,10 @@ export default function App() {
     const clip = project.clips.find((item) => item.id === selectedClipId);
     if (!clip || playhead <= clip.start + 0.05 || playhead >= clip.start + clip.duration - 0.05) { setNotice('Place the playhead inside a selected clip to split it.'); return; }
     const firstDuration = playhead - clip.start;
-    const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: playhead, duration: clip.duration - firstDuration, sourceOffset: clip.sourceOffset + firstDuration };
-    commit({ ...project, clips: project.clips.flatMap((item) => item.id === clip.id ? [{ ...item, duration: firstDuration }, second] : [item]) });
+    const secondDuration = clip.duration - firstDuration;
+    const first: TimelineClip = { ...clip, duration: firstDuration, transitionIn: Math.min(clip.transitionIn ?? 0, firstDuration / 2), transitionOut: undefined };
+    const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: playhead, duration: secondDuration, sourceOffset: clip.sourceOffset + firstDuration, transitionIn: undefined, transitionOut: Math.min(clip.transitionOut ?? 0, secondDuration / 2) };
+    commit({ ...project, clips: project.clips.flatMap((item) => item.id === clip.id ? [first, second] : [item]) });
     setSelectedClipId(second.id); setPreviewMode('timeline'); setNotice('Clip split at the playhead.');
   }
   function deleteSelectedClip() {
@@ -307,7 +316,7 @@ export default function App() {
     const asset = clip && project.assets.find((item) => item.id === clip.assetId);
     const defaultDuration = asset?.kind === 'audio' ? 8 : 4;
     if (clip && asset && clip.sourceOffset === 0 && Math.abs(clip.duration - defaultDuration) < 0.01 && Number.isFinite(mediaDuration) && mediaDuration > 0 && Math.abs(clip.duration - mediaDuration) > 0.25) {
-      commit({ ...project, clips: project.clips.map((item) => item.id === clip.id ? { ...item, duration: mediaDuration } : item) });
+      commit({ ...project, clips: project.clips.map((item) => item.id === clip.id ? { ...item, duration: mediaDuration, transitionIn: Math.min(item.transitionIn ?? 0, mediaDuration / 2), transitionOut: Math.min(item.transitionOut ?? 0, mediaDuration / 2) } : item) });
     }
   }
   function addEffect(type: EffectId) {
@@ -329,6 +338,23 @@ export default function App() {
   }
   function removeEffect(effectId: string) {
     commit({ ...project, effects: project.effects.filter((effect) => effect.id !== effectId) });
+  }
+  function addTextOverlays(overlays: TextOverlay[]) {
+    if (!overlays.length) return;
+    commit({ ...project, textOverlays: [...project.textOverlays, ...overlays] });
+    setPreviewMode('timeline');
+    setPlayhead(overlays[0].start);
+    setNotice(`${overlays.length} ${overlays[0].kind === 'caption' ? 'caption' : 'title'}${overlays.length === 1 ? '' : 's'} added.`);
+  }
+  function updateTextOverlay(updated: TextOverlay) {
+    commit({ ...project, textOverlays: project.textOverlays.map((overlay) => overlay.id === updated.id ? updated : overlay) });
+  }
+  function removeTextOverlay(id: string) {
+    commit({ ...project, textOverlays: project.textOverlays.filter((overlay) => overlay.id !== id) });
+  }
+  function updateTransition(field: 'transitionIn' | 'transitionOut', value: number) {
+    if (!selectedClip) return;
+    commit({ ...project, clips: project.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, [field]: value || undefined } : clip) });
   }
   async function importFiles(files: FileList | null) {
     if (!files?.length) return;
@@ -503,7 +529,7 @@ export default function App() {
     <section className="workspace">
       <nav className="tool-rail" aria-label="Creative tools">
         <div className="rail-top"><button className="rail-project" title="Project files"><FolderOpen size={17}/></button><span className="rail-separator"/></div>
-        {tools.map(({ id, label, icon: Icon }) => <button key={id} className={`tool-button ${activeTool === id ? 'selected' : ''}`} onClick={() => setActiveTool(id)} aria-pressed={activeTool === id}><Icon size={18}/><span>{label}</span></button>)}
+        {tools.map(({ id, label, icon: Icon }) => <button key={id} className={`tool-button ${activeTool === id ? 'selected' : ''}`} onClick={() => { setActiveTool(id); if (id === 'captions' || id === 'text' || id === 'transitions') setPreviewMode('timeline'); }} aria-pressed={activeTool === id}><Icon size={18}/><span>{label}</span></button>)}
         <div className="rail-bottom"><button className="tool-button" title="Settings"><Settings2 size={18}/><span>Settings</span></button></div>
       </nav>
 
@@ -538,7 +564,19 @@ export default function App() {
               </section>;
             })}</div> : <div className="effects-empty applied-empty">No effects yet. Choose one above to add it to this asset.</div>}
           </>}
-        </div> : <div className="tool-empty"><span className="tool-empty-icon"><activeToolInfo.icon size={20}/></span><h2>{activeToolInfo.label} workspace</h2><p>{activeTool === 'ai' ? 'Creative assistants will be connected through a separate, provider-neutral job service.' : `Add media to your project to explore ${activeToolInfo.label.toLowerCase()} tools.`}</p><button onClick={() => activeTool === 'ai' ? setNotice('AI provider services are planned for a later phase.') : setActiveTool('media')}>{activeTool === 'ai' ? 'View AI roadmap' : 'Browse project media'}<ChevronDown size={13}/></button><div className="planned-note"><LockKeyhole size={13}/>More capabilities are on the roadmap</div></div>}
+        </div> : activeTool === 'text' || activeTool === 'captions' || activeTool === 'transitions' || activeTool === 'ai'
+          ? <CreativeToolsPanel
+            tool={activeTool}
+            overlays={project.textOverlays}
+            playhead={playhead}
+            selectedClip={project.tracks.find((track) => track.id === selectedClip?.trackId)?.kind === 'video' ? selectedClip : undefined}
+            onAddOverlays={addTextOverlays}
+            onUpdateOverlay={updateTextOverlay}
+            onRemoveOverlay={removeTextOverlay}
+            onSetPlayhead={(time) => { setPreviewMode('timeline'); setPlayhead(time); }}
+            onTransitionChange={updateTransition}
+          />
+          : <div className="tool-empty"><span className="tool-empty-icon"><activeToolInfo.icon size={20}/></span><h2>{activeToolInfo.label} workspace</h2><p>Add media to your project to explore {activeToolInfo.label.toLowerCase()} tools.</p><button onClick={() => setActiveTool('media')}>Browse project media<ChevronDown size={13}/></button><div className="planned-note"><LockKeyhole size={13}/>More capabilities are on the roadmap</div></div>}
       </aside>
 
       <section className="editor-main">
@@ -547,7 +585,7 @@ export default function App() {
           <div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/>
           <div className="canvas-frame" style={{ transform: `scale(${canvasZoom})` }}>
             <div className="canvas-gradient">
-              {previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
+              {previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} overlays={project.textOverlays} playhead={playhead} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
                 {selectedAsset.kind === 'video' ? <video src={mediaUrls[selectedAsset.id]} style={{ filter: previewEffect.filter }} playsInline controls/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name} style={{ filter: previewEffect.filter }}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls/></div>}
                 {selectedAsset.kind !== 'audio' && previewEffect.vignette > 0 && <div className="preview-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${previewEffect.vignette * 0.78}) 100%)` }}/>}
               </div> : <><div className="canvas-glow one"/><div className="canvas-glow two"/><div className="canvas-center"><div className="center-mark"><Clapperboard size={21}/></div><span className="canvas-overline">{selectedAsset ? 'MEDIA PREVIEW' : 'YOUR NEXT STORY'}</span><strong>{selectedAsset ? selectedAsset.name : <>Make room<br/>for the <em>moment.</em></>}</strong><span className="canvas-caption">{selectedAsset ? loadingAssetId === selectedAsset.id ? 'Restoring media…' : 'Media preview is unavailable on this device.' : 'A new canvas is a blank invitation.'}</span></div></>}
@@ -568,7 +606,18 @@ export default function App() {
       <aside className="inspector"><div className="inspector-head"><span className="eyebrow">PROPERTIES</span><button className="icon-button subtle"><MoreHorizontal size={17}/></button></div><div className="inspector-content"><div className="selection-card"><div className="selection-icon"><Frame size={17}/></div><div><strong>Canvas settings</strong><span>Portrait composition</span></div><ChevronDown size={14}/></div><section className="inspector-section"><div className="section-title"><span>FORMAT</span><button className="icon-button subtle"><MoreHorizontal size={15}/></button></div><div className="format-preview"><div className="format-portrait"><span/></div><div className="format-copy"><strong>Portrait 9:16</strong><span>Social video</span><button>Change format <ChevronDown size={12}/></button></div></div><div className="dimension-row"><label>Width<div><input value={project.canvas.width} readOnly/><span>px</span></div></label><span className="dimension-link">↔</span><label>Height<div><input value={project.canvas.height} readOnly/><span>px</span></div></label></div><label className="inspector-select-label">Frame rate<button>{project.canvas.fps} fps <ChevronDown size={13}/></button></label></section><section className="inspector-section"><div className="section-title"><span>CANVAS</span></div><div className="inspector-property"><span>Background</span><button className="color-picker"><i style={{ background: project.canvas.background }}/><span>{project.canvas.background}</span><ChevronDown size={12}/></button></div><div className="inspector-property"><span>Safe margins</span><button className="switch on"><i/></button></div><div className="inspector-property"><span>Background fill</span><button className="switch"><i/></button></div></section><section className="inspector-section layer-summary"><div className="section-title"><span>LAYERS</span><button className="icon-button subtle"><Plus size={15}/></button></div>{project.tracks.map((track) => <div className="layer-row" key={track.id}><span className="track-color" style={{ background: track.color }}/><span>{track.name}</span><button title="Lock layer"><LockKeyhole size={12}/></button></div>)}</section><div className="inspector-tip"><Sparkles size={14}/><span>Select a layer or clip to see its editing controls here.</span></div></div><div className="inspector-bottom"><button><CircleHelp size={14}/>Inspector guide</button><span>⌘ /</span></div></aside>
     </section>
     <footer className="statusbar"><div><span className="status-online"/>Workspace ready</div><span>Frameforge Studio <i>·</i> Draft 1.0</span><button onClick={() => setNotice('Keyboard shortcuts: Space play/pause · ⌘Z undo · ⌘⇧Z redo · ⌘S save')}><CircleHelp size={13}/>Shortcuts</button></footer>
-    {exportOpen && <div className="export-backdrop" role="presentation" onMouseDown={(event) => { if (!exporting && event.target === event.currentTarget) setExportOpen(false); }}><section className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title"><button className="modal-close" aria-label="Close export" disabled={exporting} onClick={() => setExportOpen(false)}>×</button><div className="modal-mark"><Download size={18}/></div><span className="eyebrow">LOCAL EXPORT</span><h2 id="export-title">Export your project</h2><p className="modal-description">Render the timeline to a WebM video in your browser, or download the editable project document.</p><button className="modal-submit" onClick={() => void startVideoExport()} disabled={exporting}>{exporting ? `Rendering video · ${Math.round(exportProgress * 100)}%` : 'Render video (.webm)'}</button><button className="modal-secondary" onClick={downloadProjectFile} disabled={exporting}>Download editable project (.frameforge.json)</button>{exporting && <div className="export-progress" aria-label="Export progress"><div><i style={{ width: `${Math.round(exportProgress * 100)}%` }}/></div><span>{Math.round(exportProgress * 100)}%</span><button className="modal-secondary" onClick={() => exportAbort.current?.abort()}>Cancel render</button></div>}{exportError && <p className="export-error" role="alert">{exportError}</p>}<p className="export-note">Video exports run in real time and include timeline video, image, audio clips, and supported preview effects. Text, transitions, and other unfinished tools are not included yet.</p></section></div>}
+    {exportOpen && <div className="export-backdrop" role="presentation" onMouseDown={(event) => { if (!exporting && event.target === event.currentTarget) setExportOpen(false); }}>
+      <section className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title">
+        <button className="modal-close" aria-label="Close export" disabled={exporting} onClick={() => setExportOpen(false)}>×</button>
+        <div className="modal-mark"><Download size={18}/></div><span className="eyebrow">LOCAL EXPORT</span><h2 id="export-title">Export your project</h2>
+        <p className="modal-description">Render the timeline to a WebM video in your browser, or download the editable project document.</p>
+        <button className="modal-submit" onClick={() => void startVideoExport()} disabled={exporting}>{exporting ? `Rendering video · ${Math.round(exportProgress * 100)}%` : 'Render video (.webm)'}</button>
+        <button className="modal-secondary" onClick={downloadProjectFile} disabled={exporting}>Download editable project (.frameforge.json)</button>
+        {exporting && <div className="export-progress" aria-label="Export progress"><div><i style={{ width: `${Math.round(exportProgress * 100)}%` }}/></div><span>{Math.round(exportProgress * 100)}%</span><button className="modal-secondary" onClick={() => exportAbort.current?.abort()}>Cancel render</button></div>}
+        {exportError && <p className="export-error" role="alert">{exportError}</p>}
+        <p className="export-note">WebM rendering runs in real time and includes timeline video, images, audio, text overlays, fades, and supported effects. AI generation requires an external provider and is not included.</p>
+      </section>
+    </div>}
     {accountOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAccountOpen(false); }}><section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="account-title"><button className="modal-close" aria-label="Close" onClick={() => setAccountOpen(false)}>×</button><div className="modal-mark"><Clapperboard size={18}/></div><span className="eyebrow">FRAMEFORGE ACCOUNT</span><h2 id="account-title">{currentUser ? 'Your workspace' : authMode === 'login' ? 'Welcome back' : 'Create your account'}</h2>{currentUser ? <><p className="modal-description">Signed in as <strong>{currentUser.email}</strong>. Your project can sync to your account.</p><button className="modal-submit" onClick={saveDraft}>Sync this project</button><button className="modal-secondary" onClick={signOut}>Sign out</button></> : <form onSubmit={submitAuth}><p className="modal-description">Sign in to sync your project. Your local draft stays on this device.</p><label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} required minLength={10} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 10 characters"/></label>{authError && <p className="auth-error" role="alert">{authError}</p>}<button className="modal-submit" disabled={authBusy}>{authBusy ? 'Connecting…' : authMode === 'login' ? 'Sign in and sync' : 'Create account'}</button><button type="button" className="modal-secondary" onClick={() => { setAuthError(''); setAuthMode(authMode === 'login' ? 'register' : 'login'); }}>{authMode === 'login' ? 'New to Frameforge? Create account' : 'Already have an account? Sign in'}</button></form>}</section></div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button onClick={() => setNotice('')}>Dismiss</button></div>}
   </main>;

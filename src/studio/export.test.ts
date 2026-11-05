@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { makeProject } from './model';
+import { clipOpacityAt, makeProject } from './model';
 import { createExportPlan } from './export';
 
 describe('video export plan', () => {
@@ -22,7 +22,24 @@ describe('video export plan', () => {
   });
 
   it('fails with a clear message when the timeline is empty', () => {
-    expect(() => createExportPlan(makeProject())).toThrow('Add at least one timeline clip before exporting.');
+    expect(() => createExportPlan(makeProject())).toThrow('Add a timeline clip, title, or caption before exporting.');
+  });
+
+  it('exports text-only sequences and extends duration to include overlays', () => {
+    const project = makeProject();
+    project.textOverlays = [{
+      id: 'title-1', kind: 'title', text: 'Hello', start: 0, duration: 4, position: 'center', fontSize: 64, color: '#ffffff',
+    }];
+    expect(createExportPlan(project)).toMatchObject({ duration: 4, video: [], audio: [] });
+  });
+
+  it('calculates independent fade-in and fade-out opacity', () => {
+    const clip = { id: 'clip', assetId: 'image', trackId: 'video-1', start: 2, duration: 4, sourceOffset: 0, transitionIn: 1, transitionOut: 1 };
+    expect(clipOpacityAt(clip, 2)).toBe(0);
+    expect(clipOpacityAt(clip, 2.5)).toBe(0.5);
+    expect(clipOpacityAt(clip, 4)).toBe(1);
+    expect(clipOpacityAt(clip, 5.5)).toBe(0.5);
+    expect(clipOpacityAt(clip, 6)).toBe(0);
   });
 
   it('rejects clips that reference missing media or tracks', () => {

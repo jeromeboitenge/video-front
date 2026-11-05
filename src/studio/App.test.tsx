@@ -14,7 +14,60 @@ vi.mock('./export', () => ({ renderProjectVideo: vi.fn() }));
 describe('editor media and timeline flow', () => {
   it('loads project documents created before effects were introduced', () => {
     const { effects: _effects, ...legacyDocument } = makeProject();
-    expect(parseProjectDocument(legacyDocument).effects).toEqual([]);
+    const { textOverlays: _textOverlays, ...olderDocument } = legacyDocument;
+    expect(parseProjectDocument(olderDocument)).toMatchObject({ effects: [], textOverlays: [] });
+  });
+
+  it('creates a timed title and persists it in the project', async () => {
+    const project = makeProject();
+    project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 2, sourceOffset: 0 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Text' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Title text' }), { target: { value: 'A new chapter' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add title' }));
+
+    expect(await screen.findByText('A new chapter', { selector: '.timeline-text-overlay' })).toBeTruthy();
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.textOverlays?.[0]).toMatchObject({ kind: 'title', text: 'A new chapter', start: 0, duration: 3 });
+    });
+
+  });
+
+  it('imports timed SRT captions into the sequence preview', async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Captions' }));
+    await waitFor(() => expect((screen.getByRole('combobox', { name: 'Position' }) as HTMLSelectElement).value).toBe('bottom'));
+    expect((screen.getByRole('spinbutton', { name: 'Size' }) as HTMLInputElement).value).toBe('42');
+    const subtitleFile = new File(['1\n00:00:00,000 --> 00:00:02,000\nHello there'], 'captions.srt', { type: 'text/plain' });
+    Object.defineProperty(subtitleFile, 'text', { value: async () => '1\n00:00:00,000 --> 00:00:02,000\nHello there' });
+    fireEvent.change(document.querySelector<HTMLInputElement>('input[type="file"]')!, { target: { files: [subtitleFile] } });
+
+    expect(await screen.findByText('Hello there', { selector: '.timeline-text-overlay' })).toBeTruthy();
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.textOverlays?.[0]).toMatchObject({ kind: 'caption', text: 'Hello there', start: 0, duration: 2 });
+    });
+  });
+
+  it('applies a fade to the selected timeline clip', async () => {
+    const project = makeProject();
+    project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 2, sourceOffset: 0 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Transitions' }));
+    fireEvent.click(document.querySelector('.clip')!);
+    fireEvent.change(screen.getByRole('slider', { name: 'Fade in duration' }), { target: { value: '0.5' } });
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].transitionIn).toBe(0.5);
+    });
   });
 
   it('starts a rendered video export and reports completion', async () => {

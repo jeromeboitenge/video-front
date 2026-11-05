@@ -1,6 +1,6 @@
 import { getCloudMediaContent } from './api';
 import { effectStyle } from './effects';
-import type { MediaAsset, ProjectDocument, TimelineClip, Track } from './model';
+import { clipOpacityAt, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
 import { readMedia } from './mediaStore';
 
 type ExportClip = {
@@ -36,15 +36,18 @@ export function createExportPlan(project: ProjectDocument): ExportPlan {
     if (entry.track.kind === 'audio' && (asset.kind === 'audio' || asset.kind === 'video')) audio.push(item);
   }
 
-  const duration = project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
-  if (!project.clips.length || duration <= 0) throw new Error('Add at least one timeline clip before exporting.');
+  const duration = Math.max(
+    project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0),
+    project.textOverlays.reduce((end, overlay) => Math.max(end, overlay.start + overlay.duration), 0),
+  );
+  if (duration <= 0) throw new Error('Add a timeline clip, title, or caption before exporting.');
   if (!Number.isFinite(project.canvas.fps) || project.canvas.fps <= 0 || project.canvas.fps > 120) throw new Error('The project frame rate must be between 1 and 120 fps.');
   if (!Number.isFinite(project.canvas.width) || project.canvas.width <= 0 || !Number.isFinite(project.canvas.height) || project.canvas.height <= 0) {
     throw new Error('The project canvas dimensions must be greater than zero.');
   }
   video.sort((a, b) => a.trackIndex - b.trackIndex || a.clip.start - b.clip.start);
   audio.sort((a, b) => a.trackIndex - b.trackIndex || a.clip.start - b.clip.start);
-  if (!video.length && !audio.length) throw new Error('Add a visible video/image clip or an audio clip before exporting.');
+  if (!video.length && !audio.length && !project.textOverlays.length) throw new Error('Add a visible video/image clip, audio clip, title, or caption before exporting.');
   return { duration, fps: project.canvas.fps, video, audio };
 }
 
@@ -215,6 +218,7 @@ export async function renderProjectVideo(
         if (time < item.clip.start || time >= item.clip.start + item.clip.duration) continue;
         const effect = effectStyle(project.effects, item.asset.id);
         context.save();
+        context.globalAlpha = clipOpacityAt(item.clip, time);
         context.filter = effect.filter ?? 'none';
         if (item.asset.kind === 'image') {
           const image = imageSources.get(item.asset.id);
@@ -233,6 +237,46 @@ export async function renderProjectVideo(
           context.fillStyle = gradient;
           context.fillRect(0, 0, canvas.width, canvas.height);
         }
+      }
+      for (const overlay of project.textOverlays) {
+        if (time < overlay.start || time >= overlay.start + overlay.duration) continue;
+        const fontSize = Math.round(overlay.fontSize * canvas.width / 1080);
+        context.save();
+        context.font = `600 ${fontSize}px Manrope, sans-serif`;
+        const lines = overlay.text.split('\n');
+        const maxWidth = canvas.width * 0.88;
+        const wrapped: string[] = [];
+        for (const line of lines) {
+          let current = '';
+          for (const word of line.split(/\s+/)) {
+            const candidate = current ? `${current} ${word}` : word;
+            if (current && context.measureText(candidate).width > maxWidth) {
+              wrapped.push(current);
+              current = word;
+            } else current = candidate;
+          }
+          if (current) wrapped.push(current);
+        }
+        context.textAlign = 'center';
+        context.textBaseline = 'middle';
+        context.shadowColor = 'rgba(0,0,0,.7)';
+        context.shadowBlur = Math.max(2, fontSize * 0.12);
+        const lineHeight = fontSize * 1.2;
+        const contentHeight = wrapped.length * lineHeight;
+        const centerY = overlay.position === 'top'
+          ? canvas.height * 0.14 + contentHeight / 2
+          : overlay.position === 'bottom'
+            ? canvas.height * 0.86 - contentHeight / 2
+            : canvas.height / 2;
+        if (overlay.kind === 'caption') {
+          const boxWidth = Math.min(maxWidth, Math.max(...wrapped.map((line) => context.measureText(line).width)) + fontSize);
+          context.shadowBlur = 0;
+          context.fillStyle = 'rgba(0,0,0,.66)';
+          context.fillRect((canvas.width - boxWidth) / 2, centerY - contentHeight / 2 - fontSize * 0.2, boxWidth, contentHeight + fontSize * 0.4);
+        }
+        context.fillStyle = overlay.color;
+        wrapped.forEach((line, index) => context.fillText(line, canvas.width / 2, centerY - contentHeight / 2 + lineHeight * (index + 0.5), maxWidth));
+        context.restore();
       }
     };
 

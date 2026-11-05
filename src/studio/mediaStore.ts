@@ -12,7 +12,7 @@ function openDatabase() {
   return database;
 }
 
-export async function storeMedia(id: string, file: File) {
+export async function storeMedia(id: string, file: Blob) {
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, 'readwrite');

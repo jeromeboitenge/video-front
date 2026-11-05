@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { AudioLines, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
-import { formatTime, makeProject, type MediaAsset, type ProjectDocument, type TimelineClip, type ToolId } from './model';
-import { authenticate, saveCloudProject } from './api';
+import { formatTime, makeProject, parseProjectDocument, type MediaAsset, type ProjectDocument, type TimelineClip, type ToolId } from './model';
+import { authenticate, getCloudMediaContent, getCloudProject, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';
 import { readMedia, storeMedia } from './mediaStore';
 
 const tools: { id: ToolId; label: string; icon: typeof Film }[] = [
@@ -16,8 +16,7 @@ export default function App() {
     try {
       const previous = localStorage.getItem('frameforge:last-project');
       if (!previous) return makeProject();
-      const restored = JSON.parse(previous) as ProjectDocument;
-      return { ...restored, clips: restored.clips ?? [] };
+      return parseProjectDocument(JSON.parse(previous));
     } catch { return makeProject(); }
   });
   const [activeTool, setActiveTool] = useState<ToolId>('media');
@@ -27,6 +26,8 @@ export default function App() {
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [notice, setNotice] = useState('');
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({});
+  const [loadingAssetId, setLoadingAssetId] = useState<string | null>(null);
+  const [importingMedia, setImportingMedia] = useState(false);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -38,6 +39,10 @@ export default function App() {
   const [cloudProjectId, setCloudProjectId] = useState(() => {
     try { const user = JSON.parse(sessionStorage.getItem('frameforge:user') ?? 'null') as { id?: string } | null; return user?.id ? localStorage.getItem(cloudProjectKey(user.id, project.project.id)) ?? '' : ''; } catch { return ''; }
   });
+  const [cloudProjects, setCloudProjects] = useState<CloudProject[]>([]);
+  const [cloudProjectsLoading, setCloudProjectsLoading] = useState(false);
+  const [cloudProjectsError, setCloudProjectsError] = useState('');
+  const [openingCloudProjectId, setOpeningCloudProjectId] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
   const [localProjects, setLocalProjects] = useState<{ id: string; name: string; updatedAt: string }[]>(() => { try { return JSON.parse(localStorage.getItem('frameforge:projects-index') ?? '[]'); } catch { return []; } });
@@ -85,19 +90,29 @@ export default function App() {
   }, [project]);
 
   useEffect(() => {
+    if (!selectedAsset || mediaUrlMap.current[selectedAsset.id]) return;
     let active = true;
-    void Promise.all(project.assets.map(async (asset) => {
-      if (mediaUrlMap.current[asset.id]) return null;
-      const blob = await readMedia(asset.id);
-      return blob ? [asset.id, URL.createObjectURL(blob)] as const : null;
-    })).then((entries) => {
-      const added = Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => entry !== null));
-      if (!active) { Object.values(added).forEach(URL.revokeObjectURL); return; }
-      mediaUrlMap.current = { ...mediaUrlMap.current, ...added };
+    setLoadingAssetId(selectedAsset.id);
+    void readMedia(selectedAsset.id).then(async (localBlob) => {
+      const blob = localBlob ?? (selectedAsset.cloudId && sessionStorage.getItem('frameforge:access-token')
+        ? await getCloudMediaContent(selectedAsset.cloudId)
+        : undefined);
+      if (!blob) {
+        setNotice(`"${selectedAsset.name}" is not available on this device. Reimport the original file to preview it.`);
+        return;
+      }
+      if (!localBlob) await storeMedia(selectedAsset.id, blob);
+      const url = URL.createObjectURL(blob);
+      if (!active) { URL.revokeObjectURL(url); return; }
+      mediaUrlMap.current = { ...mediaUrlMap.current, [selectedAsset.id]: url };
       setMediaUrls({ ...mediaUrlMap.current });
-    }).catch(() => setNotice('Some local media could not be restored. Reimport the affected files to continue.'));
+    }).catch((error: Error) => {
+      if (active) setNotice(`Could not restore "${selectedAsset.name}": ${error.message}`);
+    }).finally(() => {
+      if (active) setLoadingAssetId(null);
+    });
     return () => { active = false; };
-  }, [project.assets]);
+  }, [selectedAsset?.id, selectedAsset?.cloudId]);
 
   useEffect(() => () => { Object.values(mediaUrlMap.current).forEach(URL.revokeObjectURL); }, []);
 
@@ -108,6 +123,21 @@ export default function App() {
     }, 1400);
     return () => window.clearTimeout(timer);
   }, [project, cloudProjectId]);
+
+  useEffect(() => {
+    if (!projectMenuOpen || !currentUser) return;
+    let active = true;
+    setCloudProjectsLoading(true);
+    setCloudProjectsError('');
+    void listCloudProjects().then((items) => {
+      if (active) setCloudProjects(items);
+    }).catch((error: Error) => {
+      if (active) setCloudProjectsError(error.message);
+    }).finally(() => {
+      if (active) setCloudProjectsLoading(false);
+    });
+    return () => { active = false; };
+  }, [projectMenuOpen, currentUser]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -152,9 +182,22 @@ export default function App() {
     if (!files?.length) return;
     const imports = Array.from(files).filter((file) => file.type.startsWith('video/') || file.type.startsWith('image/') || file.type.startsWith('audio/')).map((file) => ({ file, asset: { id: crypto.randomUUID(), name: file.name, kind: (file.type.startsWith('audio/') ? 'audio' : file.type.startsWith('image/') ? 'image' : 'video') as MediaAsset['kind'], mimeType: file.type, size: file.size } }));
     if (!imports.length) { setNotice('Choose a video, image, or audio file.'); return; }
+    setImportingMedia(true);
     try { await Promise.all(imports.map(({ file, asset }) => storeMedia(asset.id, file))); }
-    catch (error) { setNotice(`Media could not be saved in browser storage: ${(error as Error).message}`); return; }
-    const additions = imports.map(({ asset }) => asset);
+    catch (error) { setNotice(`Media could not be saved in browser storage: ${(error as Error).message}`); setImportingMedia(false); return; }
+    const uploadErrors: string[] = [];
+    const cloudAssets = sessionStorage.getItem('frameforge:access-token')
+      ? await Promise.all(imports.map(async ({ file, asset }) => {
+        try {
+          const remote = await uploadCloudMedia(file);
+          return { ...asset, cloudId: remote.id };
+        } catch (error) {
+          uploadErrors.push(`${asset.name}: ${(error as Error).message}`);
+          return asset;
+        }
+      }))
+      : imports.map(({ asset }) => asset);
+    const additions = cloudAssets;
     const clips = [...project.clips];
     for (const asset of additions) {
       const track = project.tracks.find((item) => asset.kind === 'audio' ? item.kind === 'audio' : item.kind === 'video');
@@ -167,7 +210,13 @@ export default function App() {
     mediaUrlMap.current = { ...mediaUrlMap.current, ...urls };
     setMediaUrls({ ...mediaUrlMap.current });
     setSelectedAssetId(additions[0].id);
-    commit({ ...project, assets: [...project.assets, ...additions], clips }); setNotice(`${additions.length} media item${additions.length === 1 ? '' : 's'} added and stored on this device.`);
+    commit({ ...project, assets: [...project.assets, ...additions], clips });
+    setNotice(uploadErrors.length
+      ? `${additions.length} media item${additions.length === 1 ? '' : 's'} added locally. Cloud upload failed for ${uploadErrors.join('; ')}.`
+      : sessionStorage.getItem('frameforge:access-token')
+        ? `${additions.length} media item${additions.length === 1 ? '' : 's'} saved on this device and uploaded to your account.`
+        : `${additions.length} media item${additions.length === 1 ? '' : 's'} added and stored on this device.`);
+    setImportingMedia(false);
   }
   function addAssetToTimeline(assetId: string) {
     const asset = project.assets.find((item) => item.id === assetId);
@@ -201,8 +250,30 @@ export default function App() {
     setProject(makeProject()); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPlayhead(0); setCloudProjectId(''); setProjectMenuOpen(false); setSaved(false);
   }
   function openLocalProject(id: string) {
-    try { const savedProject = localStorage.getItem(`frameforge:${id}`); if (!savedProject) throw new Error('Project draft not found on this device.'); const restored = JSON.parse(savedProject) as ProjectDocument; setProject({ ...restored, clips: restored.clips ?? [] }); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPlayhead(0); setCloudProjectId(currentUser ? localStorage.getItem(cloudProjectKey(currentUser.id, id)) ?? '' : ''); setProjectMenuOpen(false); setSaved(true); }
+    try { const savedProject = localStorage.getItem(`frameforge:${id}`); if (!savedProject) throw new Error('Project draft not found on this device.'); const restored = parseProjectDocument(JSON.parse(savedProject)); setProject(restored); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPlayhead(0); setCloudProjectId(currentUser ? localStorage.getItem(cloudProjectKey(currentUser.id, id)) ?? '' : ''); setProjectMenuOpen(false); setSaved(true); }
     catch (error) { setNotice((error as Error).message); }
+  }
+  async function openCloudProject(id: string) {
+    setOpeningCloudProjectId(id);
+    try {
+      const remote = await getCloudProject(id);
+      const restored = parseProjectDocument(remote.document);
+      localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
+      setProject(restored);
+      setSelectedAssetId(null);
+      setSelectedClipId(null);
+      setPlaying(false);
+      setPlayhead(0);
+      setCloudProjectId(remote.id);
+      if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, restored.project.id), remote.id);
+      setProjectMenuOpen(false);
+      setSaved(true);
+      setNotice(`Opened "${remote.name}". Cloud media restores when selected; local-only media must be reimported on another device.`);
+    } catch (error) {
+      setNotice(`Could not open account project: ${(error as Error).message}`);
+    } finally {
+      setOpeningCloudProjectId('');
+    }
   }
   function renameProject() {
     const name = window.prompt('Project name', project.project.name)?.trim();
@@ -216,7 +287,23 @@ export default function App() {
   return <main className="studio">
     <header className="topbar">
       <div className="brand"><span className="brand-mark"><Clapperboard size={15}/></span><span>frameforge</span><span className="brand-divider"/><span className="studio-label">STUDIO</span></div>
-      <div className="project-name"><button className="name-button" onClick={() => setProjectMenuOpen((open) => !open)}>{project.project.name}<ChevronDown size={13}/></button>{projectMenuOpen && <div className="project-menu"><div className="project-menu-label">CURRENT PROJECT</div><button className="project-menu-action" onClick={renameProject}>Rename project</button><button className="project-menu-action" onClick={startNewProject}><Plus size={13}/>New project</button>{localProjects.length > 0 && <><div className="project-menu-label recent-label">ON THIS DEVICE</div>{localProjects.slice(0, 5).map((item) => <button className={`local-project-item ${item.id === project.project.id ? 'current' : ''}`} key={item.id} onClick={() => openLocalProject(item.id)}><span>{item.name}</span><small>{new Date(item.updatedAt).toLocaleDateString()}</small></button>)}</>}</div>}<span className={`save-indicator ${saved ? '' : 'unsaved'}`}><Cloud size={13}/>{saved ? 'All changes saved' : 'Unsaved changes'}</span></div>
+      <div className="project-name">
+        <button className="name-button" onClick={() => setProjectMenuOpen((open) => !open)}>{project.project.name}<ChevronDown size={13}/></button>
+        {projectMenuOpen && <div className="project-menu">
+          <div className="project-menu-label">CURRENT PROJECT</div>
+          <button className="project-menu-action" onClick={renameProject}>Rename project</button>
+          <button className="project-menu-action" onClick={startNewProject}><Plus size={13}/>New project</button>
+          {localProjects.length > 0 && <>
+            <div className="project-menu-label recent-label">ON THIS DEVICE</div>
+            {localProjects.slice(0, 5).map((item) => <button className={`local-project-item ${item.id === project.project.id ? 'current' : ''}`} key={item.id} onClick={() => openLocalProject(item.id)}><span>{item.name}</span><small>{new Date(item.updatedAt).toLocaleDateString()}</small></button>)}
+          </>}
+          {currentUser && <>
+            <div className="project-menu-label recent-label">IN YOUR ACCOUNT</div>
+            {cloudProjectsLoading ? <div className="cloud-project-message">Loading account projects…</div> : cloudProjectsError ? <div className="cloud-project-message error" role="alert">{cloudProjectsError}</div> : cloudProjects.length > 0 ? cloudProjects.map((item) => <button className={`local-project-item ${item.id === cloudProjectId ? 'current' : ''}`} key={item.id} disabled={openingCloudProjectId !== ''} onClick={() => void openCloudProject(item.id)}><span>{openingCloudProjectId === item.id ? 'Opening…' : item.name}</span><small>{new Date(item.updated_at).toLocaleDateString()}</small></button>) : <div className="cloud-project-message">No account projects yet.</div>}
+          </>}
+        </div>}
+        <span className={`save-indicator ${saved ? '' : 'unsaved'}`}><Cloud size={13}/>{saved ? 'All changes saved' : 'Unsaved changes'}</span>
+      </div>
       <div className="top-actions"><button className="icon-button" title="Undo · Ctrl Z" onClick={undo}><Undo2 size={16}/></button><button className="icon-button" title="Redo · Ctrl Shift Z" onClick={redo}><Redo2 size={16}/></button><span className="top-divider"/><button className="icon-button" title="Help"><CircleHelp size={16}/></button><button className="avatar" aria-label="Account" onClick={() => { setAuthError(''); setAccountOpen(true); }}>{currentUser ? currentUser.email.slice(0, 1).toUpperCase() : 'A'}</button><button className="export-button" onClick={exportProject}><Download size={15}/>Export</button></div>
     </header>
     <section className="workspace">
@@ -231,8 +318,8 @@ export default function App() {
         <div className="search-box"><span>⌕</span><input aria-label="Search media" placeholder={`Search ${activeToolInfo.label.toLowerCase()}`} /><kbd>⌘ K</kbd></div>
         {activeTool === 'media' ? <>
           <div className="media-tabs"><button className="tab active">Library <span>{project.assets.length}</span></button><button className="tab">Folders</button></div>
-          <button className="import-card" onClick={() => fileRef.current?.click()}><span className="upload-icon"><Upload size={18}/></span><strong>Import media</strong><span>Video, image, and audio files</span><kbd>⌘ I</kbd></button>
-          <input ref={fileRef} type="file" accept="video/*,image/*,audio/*" multiple hidden onChange={(event) => importFiles(event.target.files)} />
+          <button className="import-card" disabled={importingMedia} onClick={() => fileRef.current?.click()}><span className="upload-icon"><Upload size={18}/></span><strong>{importingMedia ? 'Adding media…' : 'Import media'}</strong><span>Video, image, and audio files</span><kbd>⌘ I</kbd></button>
+          <input ref={fileRef} type="file" accept="video/*,image/*,audio/*" multiple hidden disabled={importingMedia} onChange={(event) => importFiles(event.target.files)} />
           <div className="asset-filter"><span>ALL MEDIA</span><button>Recent <ChevronDown size={12}/></button></div>
           {project.assets.length ? <div className="asset-list">{project.assets.map((asset) => <div className={`asset-row ${selectedAssetId === asset.id ? 'asset-selected' : ''}`} key={asset.id} onClick={() => { setSelectedAssetId(asset.id); setSelectedClipId(null); setPlayhead(0); setPlaying(false); }}><div className={`asset-thumb ${asset.kind}`}>{asset.kind === 'audio' ? <Music2 size={15}/> : asset.kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{asset.name}</strong><span>{asset.kind} · {((asset.size ?? 0) / 1048576).toFixed(1)} MB</span></div><button className="mini-add" title="Add to timeline" onClick={(event) => { event.stopPropagation(); addAssetToTimeline(asset.id); }}><Plus size={15}/></button></div>)}</div> : <div className="empty-media"><div className="empty-stack"><Image size={18}/><Music2 size={17}/><Film size={18}/></div><strong>Your library is ready</strong><p>Bring in footage, images, or audio to begin building your story.</p><button onClick={() => fileRef.current?.click()}><Plus size={14}/>Add your first media</button></div>}
           <div className="storage-meter"><div><span>LOCAL PROJECT</span><MoreHorizontal size={15}/></div><div className="meter"><i style={{ width: `${Math.min(100, project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / (500 * 1048576) * 100)}%` }}/></div><small>{(project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / 1048576).toFixed(1)} MB on this device</small></div>
@@ -241,7 +328,7 @@ export default function App() {
 
       <section className="editor-main">
         <div className="canvas-toolbar"><div className="canvas-select"><span className="canvas-dot"/><span>Canvas</span><span className="toolbar-muted">·</span><button>Portrait 9:16 <ChevronDown size={12}/></button><button className="mobile-import" onClick={() => fileRef.current?.click()}><Upload size={14}/>Import</button></div><div className="canvas-tools"><button className="tool-chip"><Frame size={14}/>Safe area</button><span className="toolbar-separator"/><button className="icon-button tiny" title="Zoom out" onClick={() => setCanvasZoom((value) => Math.max(0.5, value - 0.1))}><ZoomOut size={15}/></button><button className="zoom-value" onClick={() => setCanvasZoom(1)}>{Math.round(canvasZoom * 100)}%</button><button className="icon-button tiny" title="Zoom in" onClick={() => setCanvasZoom((value) => Math.min(1.5, value + 0.1))}><ZoomIn size={15}/></button><button className="icon-button tiny" title="Fit to screen" onClick={() => setCanvasZoom(1)}><Maximize2 size={14}/></button></div></div>
-        <div className="preview-stage"><div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/><div className="canvas-frame" style={{ transform: `scale(${canvasZoom})` }}><div className="canvas-gradient">{selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">{selectedAsset.kind === 'video' ? <video ref={videoRef} src={mediaUrls[selectedAsset.id]} playsInline onLoadedMetadata={(event) => updateClipDuration(selectedAsset.id, event.currentTarget.duration)} onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime)} onEnded={() => setPlaying(false)}/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls onLoadedMetadata={(event) => updateClipDuration(selectedAsset.id, event.currentTarget.duration)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime)}/></div>}</div> : <><div className="canvas-glow one"/><div className="canvas-glow two"/><div className="canvas-center"><div className="center-mark"><Clapperboard size={21}/></div><span className="canvas-overline">YOUR NEXT STORY</span><strong>Make room<br/>for the <em>moment.</em></strong><span className="canvas-caption">A new canvas is a blank invitation.</span></div></>}<div className="canvas-safe"><span>SAFE AREA</span></div></div></div><div className="preview-hint"><span className="hint-pulse"/>PREVIEW <span className="hint-divider"/> {project.canvas.width} × {project.canvas.height}</div><button className="fullscreen-button" title="Fullscreen preview" onClick={(event) => { const frame = event.currentTarget.parentElement?.querySelector('.canvas-frame'); if (frame?.requestFullscreen) void frame.requestFullscreen(); }}><Maximize2 size={14}/></button></div>
+        <div className="preview-stage"><div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/><div className="canvas-frame" style={{ transform: `scale(${canvasZoom})` }}><div className="canvas-gradient">{selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">{selectedAsset.kind === 'video' ? <video ref={videoRef} src={mediaUrls[selectedAsset.id]} playsInline onLoadedMetadata={(event) => updateClipDuration(selectedAsset.id, event.currentTarget.duration)} onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime)} onEnded={() => setPlaying(false)}/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls onLoadedMetadata={(event) => updateClipDuration(selectedAsset.id, event.currentTarget.duration)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime)}/></div>}</div> : <><div className="canvas-glow one"/><div className="canvas-glow two"/><div className="canvas-center"><div className="center-mark"><Clapperboard size={21}/></div><span className="canvas-overline">{selectedAsset ? 'MEDIA PREVIEW' : 'YOUR NEXT STORY'}</span><strong>{selectedAsset ? selectedAsset.name : <>Make room<br/>for the <em>moment.</em></>}</strong><span className="canvas-caption">{selectedAsset ? loadingAssetId === selectedAsset.id ? 'Restoring media…' : 'Media preview is unavailable on this device.' : 'A new canvas is a blank invitation.'}</span></div></>}<div className="canvas-safe"><span>SAFE AREA</span></div></div></div><div className="preview-hint"><span className="hint-pulse"/>PREVIEW <span className="hint-divider"/> {project.canvas.width} × {project.canvas.height}</div><button className="fullscreen-button" title="Fullscreen preview" onClick={(event) => { const frame = event.currentTarget.parentElement?.querySelector('.canvas-frame'); if (frame?.requestFullscreen) void frame.requestFullscreen(); }}><Maximize2 size={14}/></button></div>
         <div className="transport"><div className="transport-left"><button className="icon-button" title="Go to start" onClick={() => setPlayhead(0)}><span className="skip-start">|◀</span></button><button className="play-button" title="Play / pause · Space" onClick={() => setPlaying(!playing)}>{playing ? <Pause size={16} fill="currentColor"/> : <Play size={16} fill="currentColor"/>}</button><button className="icon-button" title="Step forward"><span className="skip-next">▶|</span></button><span className="transport-time"><strong>{formatTime(playhead)}</strong><span> / {formatTime(duration)}</span></span></div><div className="transport-right"><button className="icon-button" title="Mute preview"><Volume2 size={15}/></button><span className="toolbar-separator"/><button className="icon-button" title="Playback quality"><Gauge size={15}/></button><button className="quality-label">Full quality <ChevronDown size={12}/></button></div></div>
         <section className="timeline">
           <div className="timeline-header"><div className="timeline-title"><span className="eyebrow">SEQUENCE</span><strong>Timeline</strong><span className="timeline-pill">{project.tracks.length} tracks</span></div><div className="timeline-actions">{selectedClip && <><button className="tool-chip" onClick={splitSelectedClip}><Scissors size={14}/>Split</button><button className="icon-button tiny" title="Duplicate clip · Ctrl D" onClick={duplicateSelectedClip}><Copy size={14}/></button><button className="icon-button tiny" title="Delete clip" onClick={deleteSelectedClip}><Trash2 size={14}/></button></>}<button className="icon-button tiny" title="Timeline settings"><Settings2 size={15}/></button><span className="toolbar-separator"/><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.max(0.5, value - 0.1))} title="Zoom out timeline"><ZoomOut size={15}/></button><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.min(1.5, value + 0.1))} title="Zoom in timeline"><ZoomIn size={15}/></button></div></div>

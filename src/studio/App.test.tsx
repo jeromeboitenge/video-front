@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import App from './App';
+import { readMedia, storeMedia } from './mediaStore';
 
 vi.mock('./mediaStore', () => ({
   storeMedia: vi.fn().mockResolvedValue(undefined),
@@ -9,12 +10,15 @@ vi.mock('./mediaStore', () => ({
 
 describe('editor media and timeline flow', () => {
   beforeEach(() => {
+    vi.mocked(storeMedia).mockResolvedValue(undefined);
+    vi.mocked(readMedia).mockResolvedValue(undefined);
     localStorage.clear();
     sessionStorage.clear();
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:frameforge-test') });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
     Object.defineProperty(HTMLMediaElement.prototype, 'pause', { configurable: true, value: vi.fn() });
   });
-  afterEach(() => cleanup());
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
   it('imports a video, previews it, splits its timeline clip, and undoes the split', async () => {
     render(<App />);
@@ -35,5 +39,99 @@ describe('editor media and timeline flow', () => {
 
     fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
     await waitFor(() => expect(document.querySelectorAll('.clip')).toHaveLength(1));
+  });
+
+  it('lists and opens an account project while keeping its cloud identity for future saves', async () => {
+    sessionStorage.setItem('frameforge:access-token', 'test-token');
+    sessionStorage.setItem('frameforge:user', JSON.stringify({ id: 'user-1', email: 'creator@example.com' }));
+    const remoteProject = {
+      id: 'cloud-project-1',
+      name: 'Remote cut',
+      document: {
+        version: 1,
+        project: { id: 'local-remote-id', name: 'Remote cut' },
+        canvas: { width: 1080, height: 1920, fps: 30, background: '#151619' },
+        tracks: [],
+        clips: [],
+        assets: [],
+        settings: {},
+      },
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-02T00:00:00Z',
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const result = url.endsWith('/projects') ? [remoteProject] : remoteProject;
+      return { ok: true, status: 200, json: async () => result } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Untitled story' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Remote cut/ }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Remote cut' })).toBeTruthy());
+    const projectRequest = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/projects/cloud-project-1'));
+    expect(projectRequest).toBeDefined();
+    expect(new Headers(projectRequest?.[1]?.headers).get('Authorization')).toBe('Bearer test-token');
+    expect(screen.getByText(/Cloud media restores when selected/)).toBeTruthy();
+  });
+
+  it('uploads imported media for signed-in users and saves the cloud media reference', async () => {
+    sessionStorage.setItem('frameforge:access-token', 'test-token');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: async () => ({ id: 'media-server-id', name: 'scene.mp4', mime_type: 'video/mp4', size: 5, created_at: '2026-01-01T00:00:00Z' }),
+    } as Response);
+
+    render(<App />);
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    fireEvent.change(fileInput, { target: { files: [new File(['video'], 'scene.mp4', { type: 'video/mp4' })] } });
+
+    await waitFor(() => expect(screen.getByText(/uploaded to your account/)).toBeTruthy());
+    const request = fetchMock.mock.calls[0];
+    expect(request[0]).toBe('http://localhost:8000/api/v1/media');
+    expect((request[1]?.body as FormData).get('file')).toBeInstanceOf(File);
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.assets?.[0]?.cloudId).toBe('media-server-id');
+    });
+  });
+
+  it('restores a cloud-backed asset into local media storage when selected', async () => {
+    sessionStorage.setItem('frameforge:access-token', 'test-token');
+    sessionStorage.setItem('frameforge:user', JSON.stringify({ id: 'user-1', email: 'creator@example.com' }));
+    const remoteProject = {
+      id: 'cloud-project-2',
+      name: 'Cloud media cut',
+      document: {
+        version: 1,
+        project: { id: 'local-cloud-media', name: 'Cloud media cut' },
+        canvas: { width: 1080, height: 1920, fps: 30, background: '#151619' },
+        tracks: [],
+        clips: [],
+        assets: [{ id: 'local-asset-id', cloudId: 'server-asset-id', name: 'scene.mp4', kind: 'video', mimeType: 'video/mp4', size: 5 }],
+        settings: {},
+      },
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-02T00:00:00Z',
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/projects')) return { ok: true, status: 200, json: async () => [remoteProject] } as Response;
+      if (url.endsWith('/projects/cloud-project-2')) return { ok: true, status: 200, json: async () => remoteProject } as Response;
+      return { ok: true, status: 200, blob: async () => new Blob(['video'], { type: 'video/mp4' }) } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Untitled story' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Cloud media cut/ }));
+    await waitFor(() => expect(document.querySelector('.asset-row')).not.toBeNull());
+    fireEvent.click(document.querySelector('.asset-row')!);
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/media/server-asset-id/content'))).toBe(true));
+    const contentRequest = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/media/server-asset-id/content'));
+    expect(new Headers(contentRequest?.[1]?.headers).get('Authorization')).toBe('Bearer test-token');
+    await waitFor(() => expect(storeMedia).toHaveBeenCalledWith('local-asset-id', expect.any(Blob)));
   });
 });

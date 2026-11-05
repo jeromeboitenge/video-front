@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import App from './App';
 import { readMedia, storeMedia } from './mediaStore';
+import { makeProject, parseProjectDocument } from './model';
 
 vi.mock('./mediaStore', () => ({
   storeMedia: vi.fn().mockResolvedValue(undefined),
@@ -9,6 +10,11 @@ vi.mock('./mediaStore', () => ({
 }));
 
 describe('editor media and timeline flow', () => {
+  it('loads project documents created before effects were introduced', () => {
+    const { effects: _effects, ...legacyDocument } = makeProject();
+    expect(parseProjectDocument(legacyDocument).effects).toEqual([]);
+  });
+
   beforeEach(() => {
     vi.mocked(storeMedia).mockResolvedValue(undefined);
     vi.mocked(readMedia).mockResolvedValue(undefined);
@@ -39,6 +45,35 @@ describe('editor media and timeline flow', () => {
 
     fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
     await waitFor(() => expect(document.querySelectorAll('.clip')).toHaveLength(1));
+  });
+
+  it('applies adjustable effects to the selected media preview, persists them, and supports undo', async () => {
+    render(<App />);
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    fireEvent.change(fileInput, { target: { files: [new File(['video'], 'grade.mp4', { type: 'video/mp4' })] } });
+    await waitFor(() => expect(document.querySelector('.asset-row strong')?.textContent).toBe('grade.mp4'));
+    fireEvent.click(screen.getByRole('button', { name: 'Effects' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add Vivid' }));
+
+    const intensity = await screen.findByRole('slider', { name: 'Vivid intensity' });
+    const video = document.querySelector('video')!;
+    expect(video.style.filter).toBe('saturate(1.4)');
+    fireEvent.change(intensity, { target: { value: '75' } });
+    expect(video.style.filter).toBe('saturate(1.6)');
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.effects?.[0]).toMatchObject({ type: 'vivid', strength: 75, enabled: true });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Disable Vivid' }));
+    expect(video.style.filter).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Enable Vivid' }));
+    expect(video.style.filter).toBe('saturate(1.6)');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Vivid' }));
+    expect(video.style.filter).toBe('');
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+    await screen.findByRole('slider', { name: 'Vivid intensity' });
+    expect(video.style.filter).toBe('saturate(1.6)');
   });
 
   it('lists and opens an account project while keeping its cloud identity for future saves', async () => {

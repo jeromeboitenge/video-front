@@ -1,0 +1,16 @@
+.timeline-composition{position:absolute;inset:0;overflow:hidden;background:var(--bg,#151619)}
+.timeline-composition-layer{position:absolute;inset:0}
+.timeline-composition-layer img,.timeline-composition-layer video{display:block;width:100%;height:100%;object-fit:cover}
+.timeline-media-vignette{position:absolute;inset:0;pointer-events:none}
+.timeline-media-unavailable,.timeline-composition-empty{position:absolute;inset:0;display:grid;place-items:center;padding:24px;color:#c0bec7;background:#202125;text-align:center}
+.timeline-composition-empty{color:#8e8d95}
+.timeline-composition audio{display:none}
+
+@media(max-height:800px){
+  .workspace{min-height:0}
+  .editor-main{min-height:0}
+  .preview-stage{min-height:0}
+  .timeline{height:clamp(170px,27vh,210px);min-height:170px}
+  .timeline-header{height:36px}
+  .timeline-footer{height:24px}
+}

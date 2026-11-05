@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { AudioLines, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { formatTime, makeProject, parseProjectDocument, type MediaAsset, type ProjectDocument, type TimelineClip, type ToolId } from './model';
 import { effectRegistry, effectStyle, type AppliedEffect, type EffectId } from './effects';
@@ -14,6 +14,40 @@ const tools: { id: ToolId; label: string; icon: typeof Film }[] = [
 ];
 const cloudProjectKey = (userId: string, localProjectId: string) => `frameforge:cloud-project:${userId}:${localProjectId}`;
 
+type TimelinePreviewItem = {
+  clip: TimelineClip;
+  asset: MediaAsset;
+  track: ProjectDocument['tracks'][number];
+  trackIndex: number;
+};
+
+function TimelineComposition({ items, mediaUrls, effects, onMediaElement, onMediaMetadata }: {
+  items: TimelinePreviewItem[];
+  mediaUrls: Record<string, string>;
+  effects: AppliedEffect[];
+  onMediaElement: (clipId: string, element: HTMLMediaElement | null) => void;
+  onMediaMetadata: (clipId: string, duration: number) => void;
+}) {
+  const visuals = items.filter(({ asset, track }) => track.kind === 'video' && !track.hidden && asset.kind !== 'audio');
+  return <div className="timeline-composition" data-testid="timeline-composition">
+    {visuals.map(({ clip, asset }) => {
+      const url = mediaUrls[asset.id];
+      const style = effectStyle(effects, asset.id);
+      return <div className="timeline-composition-layer" key={clip.id} data-clip-id={clip.id} aria-label={asset.name}>
+        {url && asset.kind === 'video' && <video ref={(element) => onMediaElement(clip.id, element)} src={url} style={{ filter: style.filter }} playsInline preload="auto" muted onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/>}
+        {url && asset.kind === 'image' && <img src={url} alt={asset.name} style={{ filter: style.filter }}/>}
+        {!url && <div className="timeline-media-unavailable">{asset.name}</div>}
+        {style.vignette > 0 && <span className="timeline-media-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${style.vignette * 0.78}) 100%)` }}/>}
+      </div>;
+    })}
+    {!visuals.length && <div className="timeline-composition-empty">No visual clip at this time</div>}
+    {items.filter(({ track, asset }) => track.kind === 'audio' && (asset.kind === 'audio' || asset.kind === 'video')).map(({ clip, asset }) => {
+      const url = mediaUrls[asset.id];
+      return url ? <audio key={clip.id} ref={(element) => onMediaElement(clip.id, element)} src={url} preload="auto" onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/> : null;
+    })}
+  </div>;
+}
+
 export default function App() {
   const [project, setProject] = useState<ProjectDocument>(() => {
     try {
@@ -25,6 +59,8 @@ export default function App() {
   const [activeTool, setActiveTool] = useState<ToolId>('media');
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(0);
+  const [previewMode, setPreviewMode] = useState<'asset' | 'timeline'>(() => project.clips.length ? 'timeline' : 'asset');
+  const [previewMuted, setPreviewMuted] = useState(false);
   const [canvasZoom, setCanvasZoom] = useState(1);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [notice, setNotice] = useState('');
@@ -54,8 +90,9 @@ export default function App() {
   const [exportError, setExportError] = useState('');
   const [localProjects, setLocalProjects] = useState<{ id: string; name: string; updatedAt: string }[]>(() => { try { return JSON.parse(localStorage.getItem('frameforge:projects-index') ?? '[]'); } catch { return []; } });
   const fileRef = useRef<HTMLInputElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
   const mediaUrlMap = useRef<Record<string, string>>({});
+  const timelineMediaRefs = useRef(new Map<string, HTMLMediaElement>());
+  const playheadRef = useRef(playhead);
   const undoStack = useRef<ProjectDocument[]>([]);
   const redoStack = useRef<ProjectDocument[]>([]);
   const exportAbort = useRef<AbortController | null>(null);
@@ -64,29 +101,85 @@ export default function App() {
   const duration = Math.max(24, Math.ceil(lastClipEnd / 12) * 12);
   const selectedAsset = project.assets.find((asset) => asset.id === selectedAssetId);
   const selectedClip = project.clips.find((clip) => clip.id === selectedClipId);
+  const sequenceDuration = project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
+  const activeTimelineItems = useMemo(() => {
+    const assets = new Map(project.assets.map((asset) => [asset.id, asset]));
+    const tracks = new Map(project.tracks.map((track, trackIndex) => [track.id, { track, trackIndex }]));
+    return project.clips.flatMap((clip) => {
+      const asset = assets.get(clip.assetId);
+      const trackEntry = tracks.get(clip.trackId);
+      if (!asset || !trackEntry || playhead < clip.start || playhead >= clip.start + clip.duration) return [];
+      return [{ clip, asset, ...trackEntry }];
+    }).sort((a, b) => a.trackIndex - b.trackIndex || a.clip.start - b.clip.start);
+  }, [project.assets, project.clips, project.tracks, playhead]);
+  const activeTimelineKey = activeTimelineItems.map(({ clip, track }) => `${clip.id}:${track.muted}:${track.hidden}`).join('|');
   const selectedEffects = project.effects.filter((effect) => effect.assetId === selectedAssetId);
   const previewEffect = selectedAsset ? effectStyle(project.effects, selectedAsset.id) : { vignette: 0 };
   const activeToolInfo = tools.find((tool) => tool.id === activeTool)!;
   const rulerMarks = useMemo(() => Array.from({ length: duration / 2 + 1 }, (_, i) => i * 2), [duration]);
+  const setTimelineMediaElement = useCallback((clipId: string, element: HTMLMediaElement | null) => {
+    if (element) timelineMediaRefs.current.set(clipId, element);
+    else timelineMediaRefs.current.delete(clipId);
+  }, []);
+
+  useEffect(() => { playheadRef.current = playhead; }, [playhead]);
 
   useEffect(() => {
-    if (!playing) return;
-    if (selectedAsset?.kind === 'video') return;
-    const timer = window.setInterval(() => setPlayhead((time) => time >= duration ? 0 : time + 0.1), 100);
-    return () => window.clearInterval(timer);
-  }, [playing, selectedAsset?.kind]);
+    if (!playing || previewMode !== 'timeline') return;
+    if (sequenceDuration <= 0) {
+      setPlaying(false);
+      setNotice('Add a clip to the timeline before starting playback.');
+      return;
+    }
+    const startAt = Math.min(playhead, sequenceDuration);
+    let startedAt: number | undefined;
+    let frame = 0;
+    const tick = (now: number) => {
+      startedAt ??= now;
+      const time = Math.min(sequenceDuration, startAt + (now - startedAt) / 1000);
+      setPlayhead(time);
+      if (time >= sequenceDuration) {
+        setPlaying(false);
+        return;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [playing, previewMode, sequenceDuration]);
 
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (playing) void video.play().catch(() => setPlaying(false));
-    else video.pause();
-  }, [playing, selectedAssetId]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (video && Math.abs(video.currentTime - playhead) > 0.25) video.currentTime = playhead;
-  }, [playhead]);
+    const active = new Map(activeTimelineItems.map((item) => [item.clip.id, item]));
+    const listeners: Array<{ media: HTMLMediaElement; listener: () => void }> = [];
+    for (const [clipId, media] of timelineMediaRefs.current) {
+      const item = active.get(clipId);
+      if (!item || previewMode !== 'timeline') {
+        media.pause();
+        continue;
+      }
+      const synchronize = () => {
+        const sourceTime = item.clip.sourceOffset + Math.max(0, playheadRef.current - item.clip.start);
+        if (Number.isFinite(media.duration) && Math.abs(media.currentTime - sourceTime) > (playing ? 0.75 : 0.04)) {
+          media.currentTime = Math.min(sourceTime, Number.isFinite(media.duration) ? media.duration : sourceTime);
+        }
+        media.muted = previewMuted || item.track.muted;
+        if (playing) {
+          void media.play().catch((error: Error) => {
+            setPlaying(false);
+            setNotice(`Could not play "${item.asset.name}": ${error.message}`);
+          });
+        } else {
+          media.pause();
+        }
+      };
+      if (media.readyState >= HTMLMediaElement.HAVE_METADATA) synchronize();
+      else {
+        media.addEventListener('loadedmetadata', synchronize, { once: true });
+        listeners.push({ media, listener: synchronize });
+      }
+    }
+    return () => listeners.forEach(({ media, listener }) => media.removeEventListener('loadedmetadata', listener));
+  }, [activeTimelineKey, mediaUrls, playing, previewMode, previewMuted, playing ? null : playhead]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -100,29 +193,43 @@ export default function App() {
   }, [project]);
 
   useEffect(() => {
-    if (!selectedAsset || mediaUrlMap.current[selectedAsset.id]) return;
+    const clippedAssetIds = new Set(project.clips.map((clip) => clip.assetId));
+    const neededAssets = project.assets.filter((asset) => asset.id === selectedAssetId || clippedAssetIds.has(asset.id))
+      .filter((asset) => !mediaUrlMap.current[asset.id]);
+    if (!neededAssets.length) {
+      setLoadingAssetId(null);
+      return;
+    }
     let active = true;
-    setLoadingAssetId(selectedAsset.id);
-    void readMedia(selectedAsset.id).then(async (localBlob) => {
-      const blob = localBlob ?? (selectedAsset.cloudId && sessionStorage.getItem('frameforge:access-token')
-        ? await getCloudMediaContent(selectedAsset.cloudId)
-        : undefined);
-      if (!blob) {
-        setNotice(`"${selectedAsset.name}" is not available on this device. Reimport the original file to preview it.`);
+    const selectedIsLoading = neededAssets.some((asset) => asset.id === selectedAssetId);
+    if (selectedIsLoading && selectedAssetId) setLoadingAssetId(selectedAssetId);
+    void Promise.all(neededAssets.map(async (asset) => {
+      try {
+        const localBlob = await readMedia(asset.id);
+        const blob = localBlob ?? (asset.cloudId && sessionStorage.getItem('frameforge:access-token')
+          ? await getCloudMediaContent(asset.cloudId)
+          : undefined);
+        if (!blob) throw new Error('The original file is not available on this device.');
+        if (!localBlob) await storeMedia(asset.id, blob);
+        return { asset, url: URL.createObjectURL(blob) };
+      } catch (error) {
+        return { asset, error: (error as Error).message };
+      }
+    })).then((results) => {
+      if (!active) {
+        results.forEach((result) => { if ('url' in result && result.url) URL.revokeObjectURL(result.url); });
         return;
       }
-      if (!localBlob) await storeMedia(selectedAsset.id, blob);
-      const url = URL.createObjectURL(blob);
-      if (!active) { URL.revokeObjectURL(url); return; }
-      mediaUrlMap.current = { ...mediaUrlMap.current, [selectedAsset.id]: url };
-      setMediaUrls({ ...mediaUrlMap.current });
-    }).catch((error: Error) => {
-      if (active) setNotice(`Could not restore "${selectedAsset.name}": ${error.message}`);
+      const restored = results.filter((result): result is { asset: MediaAsset; url: string } => 'url' in result);
+      for (const result of restored) mediaUrlMap.current[result.asset.id] = result.url;
+      if (restored.length) setMediaUrls({ ...mediaUrlMap.current });
+      const failures = results.filter((result): result is { asset: MediaAsset; error: string } => 'error' in result);
+      if (failures.length) setNotice(failures.map(({ asset, error }) => `"${asset.name}": ${error}`).join(' '));
     }).finally(() => {
-      if (active) setLoadingAssetId(null);
+      if (active && selectedIsLoading) setLoadingAssetId(null);
     });
     return () => { active = false; };
-  }, [selectedAsset?.id, selectedAsset?.cloudId]);
+  }, [selectedAssetId, project.assets, project.clips]);
 
   useEffect(() => () => { Object.values(mediaUrlMap.current).forEach(URL.revokeObjectURL); }, []);
 
@@ -154,7 +261,7 @@ export default function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); }
       else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveDraft(); }
       else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') { event.preventDefault(); duplicateSelectedClip(); }
-      else if (event.code === 'Space' && !(event.target instanceof HTMLInputElement)) { event.preventDefault(); setPlaying((value) => !value); }
+      else if (event.code === 'Space' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) { event.preventDefault(); togglePlayback(); }
       else if (event.key.toLowerCase() === 's' && !(event.target instanceof HTMLInputElement)) splitSelectedClip();
       else if ((event.key === 'Delete' || event.key === 'Backspace') && !(event.target instanceof HTMLInputElement)) deleteSelectedClip();
     };
@@ -164,27 +271,42 @@ export default function App() {
   function commit(next: ProjectDocument) { undoStack.current.push(project); redoStack.current = []; setProject(next); setSaved(false); }
   function undo() { const prior = undoStack.current.pop(); if (prior) { redoStack.current.push(project); setProject(prior); setSaved(false); } }
   function redo() { const next = redoStack.current.pop(); if (next) { undoStack.current.push(project); setProject(next); setSaved(false); } }
+  function togglePlayback() {
+    if (playing) {
+      setPlaying(false);
+      return;
+    }
+    if (sequenceDuration <= 0) {
+      setNotice('Add a clip to the timeline before starting playback.');
+      return;
+    }
+    setPreviewMode('timeline');
+    if (playhead >= sequenceDuration) setPlayhead(0);
+    setPlaying(true);
+  }
   function splitSelectedClip() {
     const clip = project.clips.find((item) => item.id === selectedClipId);
     if (!clip || playhead <= clip.start + 0.05 || playhead >= clip.start + clip.duration - 0.05) { setNotice('Place the playhead inside a selected clip to split it.'); return; }
     const firstDuration = playhead - clip.start;
     const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: playhead, duration: clip.duration - firstDuration, sourceOffset: clip.sourceOffset + firstDuration };
     commit({ ...project, clips: project.clips.flatMap((item) => item.id === clip.id ? [{ ...item, duration: firstDuration }, second] : [item]) });
-    setSelectedClipId(second.id); setNotice('Clip split at the playhead.');
+    setSelectedClipId(second.id); setPreviewMode('timeline'); setNotice('Clip split at the playhead.');
   }
   function deleteSelectedClip() {
     if (!selectedClipId) return;
-    commit({ ...project, clips: project.clips.filter((clip) => clip.id !== selectedClipId) }); setSelectedClipId(null); setNotice('Timeline clip removed.');
+    commit({ ...project, clips: project.clips.filter((clip) => clip.id !== selectedClipId) }); setSelectedClipId(null); setPreviewMode('timeline'); setPlaying(false); setNotice('Timeline clip removed.');
   }
   function duplicateSelectedClip() {
     const clip = project.clips.find((item) => item.id === selectedClipId);
     if (!clip) return;
     const duplicate = { ...clip, id: crypto.randomUUID(), start: clip.start + clip.duration + 0.15 };
-    commit({ ...project, clips: [...project.clips, duplicate] }); setSelectedClipId(duplicate.id); setNotice('Clip duplicated.');
+    commit({ ...project, clips: [...project.clips, duplicate] }); setSelectedClipId(duplicate.id); setPreviewMode('timeline'); setPlayhead(duplicate.start); setNotice('Clip duplicated.');
   }
-  function updateClipDuration(assetId: string, mediaDuration: number) {
-    const clip = project.clips.find((item) => item.assetId === assetId && item.id === selectedClipId);
-    if (clip && Number.isFinite(mediaDuration) && mediaDuration > 0 && Math.abs(clip.duration - mediaDuration) > 0.25) {
+  function updateClipDuration(clipId: string, mediaDuration: number) {
+    const clip = project.clips.find((item) => item.id === clipId);
+    const asset = clip && project.assets.find((item) => item.id === clip.assetId);
+    const defaultDuration = asset?.kind === 'audio' ? 8 : 4;
+    if (clip && asset && clip.sourceOffset === 0 && Math.abs(clip.duration - defaultDuration) < 0.01 && Number.isFinite(mediaDuration) && mediaDuration > 0 && Math.abs(clip.duration - mediaDuration) > 0.25) {
       commit({ ...project, clips: project.clips.map((item) => item.id === clip.id ? { ...item, duration: mediaDuration } : item) });
     }
   }
@@ -235,7 +357,12 @@ export default function App() {
       const start = clips.filter((clip) => clip.trackId === track.id).reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
       clips.push({ id: crypto.randomUUID(), assetId: asset.id, trackId: track.id, start, duration: asset.kind === 'audio' ? 8 : 4, sourceOffset: 0 });
     }
-    if (clips.length > project.clips.length) setSelectedClipId(clips[project.clips.length].id);
+    if (clips.length > project.clips.length) {
+      const selectedClip = clips[project.clips.length];
+      setSelectedClipId(selectedClip.id);
+      setPlayhead(selectedClip.start);
+      setPreviewMode('timeline');
+    }
     const urls = Object.fromEntries(imports.map(({ file, asset }) => [asset.id, URL.createObjectURL(file)]));
     mediaUrlMap.current = { ...mediaUrlMap.current, ...urls };
     setMediaUrls({ ...mediaUrlMap.current });
@@ -255,7 +382,7 @@ export default function App() {
     if (!track) { setNotice('Add a matching timeline track first.'); return; }
     const start = project.clips.filter((clip) => clip.trackId === track.id).reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
     const clip: TimelineClip = { id: crypto.randomUUID(), assetId, trackId: track.id, start, duration: asset.kind === 'audio' ? 8 : 4, sourceOffset: 0 };
-    commit({ ...project, clips: [...project.clips, clip] }); setSelectedAssetId(assetId); setSelectedClipId(clip.id); setNotice(`${asset.name} added to ${track.name}.`);
+    commit({ ...project, clips: [...project.clips, clip] }); setSelectedAssetId(assetId); setSelectedClipId(clip.id); setPreviewMode('timeline'); setPlayhead(clip.start); setNotice(`${asset.name} added to ${track.name}.`);
   }
   async function saveDraft() {
     localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project)); setSaved(true);
@@ -277,10 +404,10 @@ export default function App() {
   function signOut() { sessionStorage.removeItem('frameforge:access-token'); sessionStorage.removeItem('frameforge:user'); setCurrentUser(null); setCloudProjectId(''); setAccountOpen(false); setNotice('Signed out. This device draft remains available.'); }
   function startNewProject() {
     localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
-    setProject(makeProject()); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPlayhead(0); setCloudProjectId(''); setProjectMenuOpen(false); setSaved(false);
+    setProject(makeProject()); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(''); setProjectMenuOpen(false); setSaved(false);
   }
   function openLocalProject(id: string) {
-    try { const savedProject = localStorage.getItem(`frameforge:${id}`); if (!savedProject) throw new Error('Project draft not found on this device.'); const restored = parseProjectDocument(JSON.parse(savedProject)); setProject(restored); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPlayhead(0); setCloudProjectId(currentUser ? localStorage.getItem(cloudProjectKey(currentUser.id, id)) ?? '' : ''); setProjectMenuOpen(false); setSaved(true); }
+    try { const savedProject = localStorage.getItem(`frameforge:${id}`); if (!savedProject) throw new Error('Project draft not found on this device.'); const restored = parseProjectDocument(JSON.parse(savedProject)); setProject(restored); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(currentUser ? localStorage.getItem(cloudProjectKey(currentUser.id, id)) ?? '' : ''); setProjectMenuOpen(false); setSaved(true); }
     catch (error) { setNotice((error as Error).message); }
   }
   async function openCloudProject(id: string) {
@@ -293,6 +420,7 @@ export default function App() {
       setSelectedAssetId(null);
       setSelectedClipId(null);
       setPlaying(false);
+      setPreviewMode('asset');
       setPlayhead(0);
       setCloudProjectId(remote.id);
       if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, restored.project.id), remote.id);
@@ -387,7 +515,7 @@ export default function App() {
           <button className="import-card" disabled={importingMedia} onClick={() => fileRef.current?.click()}><span className="upload-icon"><Upload size={18}/></span><strong>{importingMedia ? 'Adding media…' : 'Import media'}</strong><span>Video, image, and audio files</span><kbd>⌘ I</kbd></button>
           <input ref={fileRef} type="file" accept="video/*,image/*,audio/*" multiple hidden disabled={importingMedia} onChange={(event) => importFiles(event.target.files)} />
           <div className="asset-filter"><span>ALL MEDIA</span><button>Recent <ChevronDown size={12}/></button></div>
-          {project.assets.length ? <div className="asset-list">{project.assets.map((asset) => <div className={`asset-row ${selectedAssetId === asset.id ? 'asset-selected' : ''}`} key={asset.id} onClick={() => { setSelectedAssetId(asset.id); setSelectedClipId(null); setPlayhead(0); setPlaying(false); }}><div className={`asset-thumb ${asset.kind}`}>{asset.kind === 'audio' ? <Music2 size={15}/> : asset.kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{asset.name}</strong><span>{asset.kind} · {((asset.size ?? 0) / 1048576).toFixed(1)} MB</span></div><button className="mini-add" title="Add to timeline" onClick={(event) => { event.stopPropagation(); addAssetToTimeline(asset.id); }}><Plus size={15}/></button></div>)}</div> : <div className="empty-media"><div className="empty-stack"><Image size={18}/><Music2 size={17}/><Film size={18}/></div><strong>Your library is ready</strong><p>Bring in footage, images, or audio to begin building your story.</p><button onClick={() => fileRef.current?.click()}><Plus size={14}/>Add your first media</button></div>}
+          {project.assets.length ? <div className="asset-list">{project.assets.map((asset) => <div className={`asset-row ${selectedAssetId === asset.id ? 'asset-selected' : ''}`} key={asset.id} onClick={() => { setSelectedAssetId(asset.id); setSelectedClipId(null); setPreviewMode('asset'); setPlayhead(0); setPlaying(false); }}><div className={`asset-thumb ${asset.kind}`}>{asset.kind === 'audio' ? <Music2 size={15}/> : asset.kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{asset.name}</strong><span>{asset.kind} · {((asset.size ?? 0) / 1048576).toFixed(1)} MB</span></div><button className="mini-add" title="Add to timeline" onClick={(event) => { event.stopPropagation(); addAssetToTimeline(asset.id); }}><Plus size={15}/></button></div>)}</div> : <div className="empty-media"><div className="empty-stack"><Image size={18}/><Music2 size={17}/><Film size={18}/></div><strong>Your library is ready</strong><p>Bring in footage, images, or audio to begin building your story.</p><button onClick={() => fileRef.current?.click()}><Plus size={14}/>Add your first media</button></div>}
           <div className="storage-meter"><div><span>LOCAL PROJECT</span><MoreHorizontal size={15}/></div><div className="meter"><i style={{ width: `${Math.min(100, project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / (500 * 1048576) * 100)}%` }}/></div><small>{(project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / 1048576).toFixed(1)} MB on this device</small></div>
         </> : activeTool === 'effects' ? <div className="effects-panel">
           <div className="effects-intro"><span className="eyebrow">PREVIEW EFFECTS</span><p>Non-destructive color and lens adjustments for the selected image or video.</p></div>
@@ -415,12 +543,25 @@ export default function App() {
 
       <section className="editor-main">
         <div className="canvas-toolbar"><div className="canvas-select"><span className="canvas-dot"/><span>Canvas</span><span className="toolbar-muted">·</span><button>Portrait 9:16 <ChevronDown size={12}/></button><button className="mobile-import" onClick={() => fileRef.current?.click()}><Upload size={14}/>Import</button></div><div className="canvas-tools"><button className="tool-chip"><Frame size={14}/>Safe area</button><span className="toolbar-separator"/><button className="icon-button tiny" title="Zoom out" onClick={() => setCanvasZoom((value) => Math.max(0.5, value - 0.1))}><ZoomOut size={15}/></button><button className="zoom-value" onClick={() => setCanvasZoom(1)}>{Math.round(canvasZoom * 100)}%</button><button className="icon-button tiny" title="Zoom in" onClick={() => setCanvasZoom((value) => Math.min(1.5, value + 0.1))}><ZoomIn size={15}/></button><button className="icon-button tiny" title="Fit to screen" onClick={() => setCanvasZoom(1)}><Maximize2 size={14}/></button></div></div>
-        <div className="preview-stage"><div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/><div className="canvas-frame" style={{ transform: `scale(${canvasZoom})` }}><div className="canvas-gradient">{selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">{selectedAsset.kind === 'video' ? <video ref={videoRef} src={mediaUrls[selectedAsset.id]} style={{ filter: previewEffect.filter }} playsInline onLoadedMetadata={(event) => updateClipDuration(selectedAsset.id, event.currentTarget.duration)} onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime)} onEnded={() => setPlaying(false)}/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name} style={{ filter: previewEffect.filter }}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls onLoadedMetadata={(event) => updateClipDuration(selectedAsset.id, event.currentTarget.duration)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime)}/></div>}{selectedAsset.kind !== 'audio' && previewEffect.vignette > 0 && <div className="preview-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${previewEffect.vignette * 0.78}) 100%)` }}/>}</div> : <><div className="canvas-glow one"/><div className="canvas-glow two"/><div className="canvas-center"><div className="center-mark"><Clapperboard size={21}/></div><span className="canvas-overline">{selectedAsset ? 'MEDIA PREVIEW' : 'YOUR NEXT STORY'}</span><strong>{selectedAsset ? selectedAsset.name : <>Make room<br/>for the <em>moment.</em></>}</strong><span className="canvas-caption">{selectedAsset ? loadingAssetId === selectedAsset.id ? 'Restoring media…' : 'Media preview is unavailable on this device.' : 'A new canvas is a blank invitation.'}</span></div></>}<div className="canvas-safe"><span>SAFE AREA</span></div></div></div><div className="preview-hint"><span className="hint-pulse"/>PREVIEW <span className="hint-divider"/> {project.canvas.width} × {project.canvas.height}</div><button className="fullscreen-button" title="Fullscreen preview" onClick={(event) => { const frame = event.currentTarget.parentElement?.querySelector('.canvas-frame'); if (frame?.requestFullscreen) void frame.requestFullscreen(); }}><Maximize2 size={14}/></button></div>
-        <div className="transport"><div className="transport-left"><button className="icon-button" title="Go to start" onClick={() => setPlayhead(0)}><span className="skip-start">|◀</span></button><button className="play-button" title="Play / pause · Space" onClick={() => setPlaying(!playing)}>{playing ? <Pause size={16} fill="currentColor"/> : <Play size={16} fill="currentColor"/>}</button><button className="icon-button" title="Step forward"><span className="skip-next">▶|</span></button><span className="transport-time"><strong>{formatTime(playhead)}</strong><span> / {formatTime(duration)}</span></span></div><div className="transport-right"><button className="icon-button" title="Mute preview"><Volume2 size={15}/></button><span className="toolbar-separator"/><button className="icon-button" title="Playback quality"><Gauge size={15}/></button><button className="quality-label">Full quality <ChevronDown size={12}/></button></div></div>
+        <div className="preview-stage">
+          <div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/>
+          <div className="canvas-frame" style={{ transform: `scale(${canvasZoom})` }}>
+            <div className="canvas-gradient">
+              {previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
+                {selectedAsset.kind === 'video' ? <video src={mediaUrls[selectedAsset.id]} style={{ filter: previewEffect.filter }} playsInline controls/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name} style={{ filter: previewEffect.filter }}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls/></div>}
+                {selectedAsset.kind !== 'audio' && previewEffect.vignette > 0 && <div className="preview-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${previewEffect.vignette * 0.78}) 100%)` }}/>}
+              </div> : <><div className="canvas-glow one"/><div className="canvas-glow two"/><div className="canvas-center"><div className="center-mark"><Clapperboard size={21}/></div><span className="canvas-overline">{selectedAsset ? 'MEDIA PREVIEW' : 'YOUR NEXT STORY'}</span><strong>{selectedAsset ? selectedAsset.name : <>Make room<br/>for the <em>moment.</em></>}</strong><span className="canvas-caption">{selectedAsset ? loadingAssetId === selectedAsset.id ? 'Restoring media…' : 'Media preview is unavailable on this device.' : 'A new canvas is a blank invitation.'}</span></div></>}
+              <div className="canvas-safe"><span>SAFE AREA</span></div>
+            </div>
+          </div>
+          <div className="preview-hint"><span className="hint-pulse"/>PREVIEW <span className="hint-divider"/> {project.canvas.width} × {project.canvas.height}</div>
+          <button className="fullscreen-button" title="Fullscreen preview" onClick={(event) => { const frame = event.currentTarget.parentElement?.querySelector('.canvas-frame'); if (frame?.requestFullscreen) void frame.requestFullscreen(); }}><Maximize2 size={14}/></button>
+        </div>
+        <div className="transport"><div className="transport-left"><button className="icon-button" title="Go to start" aria-label="Go to start" onClick={() => { setPlaying(false); setPreviewMode('timeline'); setPlayhead(0); }}><span className="skip-start">|◀</span></button><button className="play-button" title="Play / pause · Space" aria-label="Play / pause · Space" onClick={togglePlayback}>{playing ? <Pause size={16} fill="currentColor"/> : <Play size={16} fill="currentColor"/>}</button><button className="icon-button" title="Step forward" aria-label="Step forward" onClick={() => { setPlaying(false); setPreviewMode('timeline'); setPlayhead((time) => Math.min(sequenceDuration, time + 1 / project.canvas.fps)); }}><span className="skip-next">▶|</span></button><span className="transport-time"><strong>{formatTime(playhead)}</strong><span> / {formatTime(sequenceDuration || duration)}</span></span></div><div className="transport-right"><button className="icon-button" title={previewMuted ? 'Unmute preview' : 'Mute preview'} aria-label={previewMuted ? 'Unmute preview' : 'Mute preview'} aria-pressed={previewMuted} onClick={() => setPreviewMuted((muted) => !muted)}><Volume2 size={15} opacity={previewMuted ? .45 : 1}/></button><span className="toolbar-separator"/><button className="icon-button" title="Playback quality"><Gauge size={15}/></button><button className="quality-label">Full quality <ChevronDown size={12}/></button></div></div>
         <section className="timeline">
           <div className="timeline-header"><div className="timeline-title"><span className="eyebrow">SEQUENCE</span><strong>Timeline</strong><span className="timeline-pill">{project.tracks.length} tracks</span></div><div className="timeline-actions">{selectedClip && <><button className="tool-chip" onClick={splitSelectedClip}><Scissors size={14}/>Split</button><button className="icon-button tiny" title="Duplicate clip · Ctrl D" onClick={duplicateSelectedClip}><Copy size={14}/></button><button className="icon-button tiny" title="Delete clip" onClick={deleteSelectedClip}><Trash2 size={14}/></button></>}<button className="icon-button tiny" title="Timeline settings"><Settings2 size={15}/></button><span className="toolbar-separator"/><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.max(0.5, value - 0.1))} title="Zoom out timeline"><ZoomOut size={15}/></button><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.min(1.5, value + 0.1))} title="Zoom in timeline"><ZoomIn size={15}/></button></div></div>
           <div className="timeline-body"><div className="track-labels"><div className="ruler-spacer"><button title="Add track" onClick={() => { const id = crypto.randomUUID(); commit({ ...project, tracks: [...project.tracks, { id, name: `Video ${project.tracks.length + 1}`, kind: 'video', color: '#ad7dff', muted: false, hidden: false, locked: false }] }); }}><Plus size={15}/></button></div>{project.tracks.map((track, index) => <div className="track-label" key={track.id}><span className="track-color" style={{ background: track.color }}/><span className="track-name">{track.name}</span><button title={track.kind === 'audio' ? 'Mute track' : 'Hide track'} onClick={() => commit({ ...project, tracks: project.tracks.map((item, i) => i === index ? { ...item, [item.kind === 'audio' ? 'muted' : 'hidden']: !item[item.kind === 'audio' ? 'muted' : 'hidden'] } : item) })}>{track.kind === 'audio' ? <Volume2 size={13} opacity={track.muted ? .4 : 1}/> : <Square size={12} opacity={track.hidden ? .4 : 1}/>}</button><button title="Lock track" onClick={() => commit({ ...project, tracks: project.tracks.map((item, i) => i === index ? { ...item, locked: !item.locked } : item) })}><LockKeyhole size={12} opacity={track.locked ? 1 : .5}/></button></div>)}</div>
-            <div className="timeline-scroll"><div className="timeline-content" style={{ width: `${100 * timelineZoom}%`, minWidth: `${450 * timelineZoom}px` }} onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); setPlayhead(Math.max(0, Math.min(duration, (event.clientX - bounds.left) / bounds.width * duration))); }}><div className="ruler">{rulerMarks.map((mark) => <div key={mark} className="ruler-mark" style={{ left: `${mark / duration * 100}%` }}><i/><span>{formatTime(mark)}</span></div>)}</div>{project.tracks.map((track) => <div className="track-lane" key={track.id}><div className="lane-grid"/>{project.clips.filter((clip) => clip.trackId === track.id).map((clip) => { const asset = project.assets.find((item) => item.id === clip.assetId); if (!asset) return null; return <button className={`clip ${clip.id === selectedClipId ? 'clip-selected' : ''}`} key={clip.id} style={{ left: `${clip.start / duration * 100}%`, width: `${Math.max(8, clip.duration / duration * 100)}%`, borderColor: `${track.color}77`, background: `linear-gradient(100deg, ${track.color}38, ${track.color}20)` }} onClick={() => { setSelectedClipId(clip.id); setSelectedAssetId(asset.id); setNotice(`${asset.name} selected.`); }}><span className="clip-grip"/><span className="clip-icon">{asset.kind === 'audio' ? <AudioLines size={13}/> : <Film size={13}/>}</span><span className="clip-name">{asset.name}</span><span className="clip-wave">{track.kind === 'audio' && Array.from({ length: 25 }, (_, k) => <i key={k} style={{ height: `${20 + Math.abs(Math.sin(k * 2.4)) * 65}%` }}/>)}</span><span className="clip-grip end"/></button>; })}</div>)}<div className="playhead" style={{ left: `${playhead / duration * 100}%` }}><i/></div></div><button className="timeline-add-track" onClick={() => { const id = crypto.randomUUID(); commit({ ...project, tracks: [...project.tracks, { id, name: `Track ${project.tracks.length + 1}`, kind: 'video', color: '#ad7dff', muted: false, hidden: false, locked: false }] }); }}><Plus size={14}/></button></div></div>
+            <div className="timeline-scroll"><div className="timeline-content" style={{ width: `${100 * timelineZoom}%`, minWidth: `${450 * timelineZoom}px` }} onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); setPreviewMode('timeline'); setPlayhead(Math.max(0, Math.min(duration, (event.clientX - bounds.left) / bounds.width * duration))); }}><div className="ruler">{rulerMarks.map((mark) => <div key={mark} className="ruler-mark" style={{ left: `${mark / duration * 100}%` }}><i/><span>{formatTime(mark)}</span></div>)}</div>{project.tracks.map((track) => <div className="track-lane" key={track.id}><div className="lane-grid"/>{project.clips.filter((clip) => clip.trackId === track.id).map((clip) => { const asset = project.assets.find((item) => item.id === clip.assetId); if (!asset) return null; return <button className={`clip ${clip.id === selectedClipId ? 'clip-selected' : ''}`} key={clip.id} style={{ left: `${clip.start / duration * 100}%`, width: `${Math.max(8, clip.duration / duration * 100)}%`, borderColor: `${track.color}77`, background: `linear-gradient(100deg, ${track.color}38, ${track.color}20)` }} onClick={(event) => { event.stopPropagation(); setPlaying(false); setPreviewMode('timeline'); setSelectedClipId(clip.id); setSelectedAssetId(asset.id); setPlayhead(clip.start); setNotice(`${asset.name} selected.`); }}><span className="clip-grip"/><span className="clip-icon">{asset.kind === 'audio' ? <AudioLines size={13}/> : <Film size={13}/>}</span><span className="clip-name">{asset.name}</span><span className="clip-wave">{track.kind === 'audio' && Array.from({ length: 25 }, (_, k) => <i key={k} style={{ height: `${20 + Math.abs(Math.sin(k * 2.4)) * 65}%` }}/>)}</span><span className="clip-grip end"/></button>; })}</div>)}<div className="playhead" style={{ left: `${playhead / duration * 100}%` }}><i/></div></div><button className="timeline-add-track" onClick={() => { const id = crypto.randomUUID(); commit({ ...project, tracks: [...project.tracks, { id, name: `Track ${project.tracks.length + 1}`, kind: 'video', color: '#ad7dff', muted: false, hidden: false, locked: false }] }); }}><Plus size={14}/></button></div></div>
             <div className="timeline-footer"><span><Command size={12}/> Click timeline to move playhead</span><span>Snapping <i className="toggle-on"/></span><button onClick={saveDraft}><Cloud size={13}/>Save draft</button></div>
           </section>
       </section>

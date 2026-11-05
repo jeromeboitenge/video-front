@@ -40,6 +40,37 @@ describe('editor media and timeline flow', () => {
     );
   });
 
+  it('previews the clip under the playhead and shows gaps when scrubbing', async () => {
+    const project = makeProject();
+    project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 2, sourceOffset: 0 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+    const timeline = document.querySelector<HTMLElement>('.timeline-content')!;
+    vi.spyOn(timeline, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 200, width: 600, height: 200, toJSON: () => ({}) });
+
+    fireEvent.click(timeline, { clientX: 20 });
+    const composition = await screen.findByTestId('timeline-composition');
+    expect(composition.querySelector('.timeline-media-unavailable')?.textContent).toBe('portrait.png');
+
+    fireEvent.click(timeline, { clientX: 120 });
+    expect(await screen.findByText('No visual clip at this time')).toBeTruthy();
+  });
+
+  it('advances the sequence playhead when playback starts', async () => {
+    const project = makeProject();
+    project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 1.5, sourceOffset: 0 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Play / pause · Space' }));
+    await screen.findByTestId('timeline-composition');
+    await waitFor(() => expect(document.querySelector('.transport-time strong')?.textContent).not.toBe('00:00.0'));
+    expect(document.querySelector('.timeline-composition-layer')?.getAttribute('aria-label')).toBe('portrait.png');
+  });
+
   beforeEach(() => {
     vi.mocked(storeMedia).mockResolvedValue(undefined);
     vi.mocked(readMedia).mockResolvedValue(undefined);
@@ -66,6 +97,7 @@ describe('editor media and timeline flow', () => {
     const timeline = document.querySelector<HTMLElement>('.timeline-content')!;
     vi.spyOn(timeline, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 200, width: 600, height: 200, toJSON: () => ({}) });
     fireEvent.click(screen.getByRole('button', { name: /scene\.mp4/i }), { clientX: 50 });
+    fireEvent.click(timeline, { clientX: 50 });
     fireEvent.click(screen.getByRole('button', { name: /split/i }));
     await waitFor(() => expect(document.querySelectorAll('.clip')).toHaveLength(2));
 

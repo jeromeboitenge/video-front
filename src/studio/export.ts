@@ -240,7 +240,7 @@ export async function renderProjectVideo(
       context.fillRect(0, 0, canvas.width, canvas.height);
       for (const item of plan.video) {
         if (time < item.clip.start || time >= item.clip.start + item.clip.duration) continue;
-        const effect = effectStyle(project.effects, item.asset.id);
+        const effect = effectStyle(project.effects, item.asset.id, project.colorAdjustments[item.asset.id]);
         context.save();
         context.globalAlpha = clipVisualOpacityAt(item.clip, time);
         context.filter = effect.filter ?? 'none';

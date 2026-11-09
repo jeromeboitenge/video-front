@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, makeProject, parseProjectDocument, type ClipKeyframe, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId } from './model';
-import { effectRegistry, effectStyle, type AppliedEffect, type EffectId } from './effects';
+import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
 import { audioGainAt, renderProjectVideo } from './export';
 import { authenticate, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';
 import { readMedia, storeMedia } from './mediaStore';
@@ -15,6 +15,13 @@ const tools: { id: ToolId; label: string; icon: typeof Film }[] = [
   { id: 'transitions', label: 'Transitions', icon: Layers3 }, { id: 'ai', label: 'AI studio', icon: WandSparkles },
 ];
 const cloudProjectKey = (userId: string, localProjectId: string) => `frameforge:cloud-project:${userId}:${localProjectId}`;
+const colorAdjustmentControls: { field: keyof ColorAdjustment; label: string }[] = [
+  { field: 'exposure', label: 'Exposure' },
+  { field: 'contrast', label: 'Contrast' },
+  { field: 'saturation', label: 'Saturation' },
+  { field: 'temperature', label: 'Temperature' },
+  { field: 'tint', label: 'Tint' },
+];
 
 type TimelinePreviewItem = {
   clip: TimelineClip;
@@ -34,10 +41,11 @@ type TimelineDrag = {
   changed: boolean;
 };
 
-function TimelineComposition({ items, mediaUrls, effects, overlays, playhead, onMediaElement, onMediaMetadata }: {
+function TimelineComposition({ items, mediaUrls, effects, colorAdjustments, overlays, playhead, onMediaElement, onMediaMetadata }: {
   items: TimelinePreviewItem[];
   mediaUrls: Record<string, string>;
   effects: AppliedEffect[];
+  colorAdjustments: Record<string, ColorAdjustment>;
   overlays: TextOverlay[];
   playhead: number;
   onMediaElement: (clipId: string, element: HTMLMediaElement | null) => void;
@@ -47,7 +55,7 @@ function TimelineComposition({ items, mediaUrls, effects, overlays, playhead, on
   return <div className="timeline-composition" data-testid="timeline-composition">
     {visuals.map(({ clip, asset }) => {
       const url = mediaUrls[asset.id];
-      const style = effectStyle(effects, asset.id);
+      const style = effectStyle(effects, asset.id, colorAdjustments[asset.id]);
       return <div className="timeline-composition-layer" key={clip.id} data-clip-id={clip.id} aria-label={asset.name} style={{ opacity: clipVisualOpacityAt(clip, playhead) }}>
         {url && asset.kind === 'video' && <video ref={(element) => onMediaElement(clip.id, element)} src={url} style={{ filter: style.filter, transform: clipTransformStyle(clip, playhead - clip.start) }} playsInline preload="auto" muted onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/>}
         {url && asset.kind === 'image' && <img src={url} alt={asset.name} style={{ filter: style.filter, transform: clipTransformStyle(clip, playhead - clip.start) }}/>}
@@ -147,7 +155,8 @@ export default function App() {
   }, [project.assets, project.clips, project.tracks, playhead]);
   const activeTimelineKey = activeTimelineItems.map(({ clip, track }) => `${clip.id}:${track.muted}:${track.hidden}:${clip.volume ?? 1}:${clip.transitionIn ?? 0}:${clip.transitionOut ?? 0}`).join('|');
   const selectedEffects = project.effects.filter((effect) => effect.assetId === selectedAssetId);
-  const previewEffect = selectedAsset ? effectStyle(project.effects, selectedAsset.id) : { vignette: 0 };
+  const selectedColorAdjustment = selectedAsset ? project.colorAdjustments[selectedAsset.id] ?? defaultColorAdjustment : defaultColorAdjustment;
+  const previewEffect = selectedAsset ? effectStyle(project.effects, selectedAsset.id, selectedColorAdjustment) : { vignette: 0 };
   const activeToolInfo = tools.find((tool) => tool.id === activeTool)!;
   const rulerMarks = useMemo(() => Array.from({ length: duration / 2 + 1 }, (_, i) => i * 2), [duration]);
   const setTimelineMediaElement = useCallback((clipId: string, element: HTMLMediaElement | null) => {
@@ -466,6 +475,16 @@ export default function App() {
   function removeEffect(effectId: string) {
     commit({ ...project, effects: project.effects.filter((effect) => effect.id !== effectId) });
   }
+  function updateColorAdjustment(patch: Partial<ColorAdjustment>) {
+    if (!selectedAsset || selectedAsset.kind === 'audio') return;
+    commit({
+      ...project,
+      colorAdjustments: {
+        ...project.colorAdjustments,
+        [selectedAsset.id]: { ...selectedColorAdjustment, ...patch },
+      },
+    });
+  }
   function addTextOverlays(overlays: TextOverlay[]) {
     if (!overlays.length) return;
     commit({ ...project, textOverlays: [...project.textOverlays, ...overlays] });
@@ -761,6 +780,14 @@ export default function App() {
           {!selectedAsset && <div className="effects-empty">Select an image or video in your media library to apply an effect.</div>}
           {selectedAsset?.kind === 'audio' && <div className="effects-empty">Visual effects apply to images and videos. Select a visual asset to continue.</div>}
           {selectedAsset && selectedAsset.kind !== 'audio' && <>
+            <div className="effects-section-label">COLOR ADJUSTMENTS</div>
+            <div className="color-adjustments">
+              {colorAdjustmentControls.map(({ field, label }) => <label key={field} htmlFor={`color-adjustment-${field}`}>
+                <span>{label}<output>{selectedColorAdjustment[field] > 0 ? '+' : ''}{selectedColorAdjustment[field]}</output></span>
+                <input id={`color-adjustment-${field}`} aria-label={label} type="range" min="-100" max="100" step="1" value={selectedColorAdjustment[field]} onChange={(event) => updateColorAdjustment({ [field]: Number(event.target.value) })}/>
+              </label>)}
+              <button className="color-adjustment-reset" onClick={() => updateColorAdjustment(defaultColorAdjustment)}>Reset color</button>
+            </div>
             <div className="effects-section-label">ADD EFFECT</div>
             <div className="effect-library">{effectRegistry.map((effect) => {
               const applied = selectedEffects.some((item) => item.type === effect.id);
@@ -798,7 +825,7 @@ export default function App() {
           <div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/>
           <div className="canvas-frame" style={{ transform: `scale(${canvasZoom})` }}>
             <div className="canvas-gradient">
-              {previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} overlays={project.textOverlays} playhead={playhead} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
+              {previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} colorAdjustments={project.colorAdjustments} overlays={project.textOverlays} playhead={playhead} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
                 {selectedAsset.kind === 'video' ? <video src={mediaUrls[selectedAsset.id]} style={{ filter: previewEffect.filter }} playsInline controls/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name} style={{ filter: previewEffect.filter }}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls/></div>}
                 {selectedAsset.kind !== 'audio' && previewEffect.vignette > 0 && <div className="preview-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${previewEffect.vignette * 0.78}) 100%)` }}/>}
               </div> : <><div className="canvas-glow one"/><div className="canvas-glow two"/><div className="canvas-center"><div className="center-mark"><Clapperboard size={21}/></div><span className="canvas-overline">{selectedAsset ? 'MEDIA PREVIEW' : 'YOUR NEXT STORY'}</span><strong>{selectedAsset ? selectedAsset.name : <>Make room<br/>for the <em>moment.</em></>}</strong><span className="canvas-caption">{selectedAsset ? loadingAssetId === selectedAsset.id ? 'Restoring media…' : 'Media preview is unavailable on this device.' : 'A new canvas is a blank invitation.'}</span></div></>}

@@ -1,4 +1,4 @@
-import type { AppliedEffect } from './effects';
+import type { AppliedEffect, ColorAdjustment } from './effects';
 
 export type ToolId = 'media' | 'audio' | 'text' | 'captions' | 'elements' | 'effects' | 'transitions' | 'ai';
 export type Track = { id: string; name: string; kind: 'video' | 'audio' | 'text'; color: string; muted: boolean; hidden: boolean; locked: boolean };
@@ -7,9 +7,10 @@ export type VisualTransform = { x: number; y: number; scale: number; rotation: n
 export type ClipKeyframe = VisualTransform & { time: number };
 export type TimelineClip = { id: string; assetId: string; trackId: string; start: number; duration: number; sourceOffset: number; volume?: number; x?: number; y?: number; scale?: number; rotation?: number; opacity?: number; keyframes?: ClipKeyframe[]; transitionIn?: number; transitionOut?: number };
 export type TextOverlay = { id: string; kind: 'title' | 'caption'; text: string; start: number; duration: number; position: 'top' | 'center' | 'bottom'; fontSize: number; color: string; fontFamily?: 'Manrope' | 'Arial' | 'Georgia'; fontWeight?: 'normal' | 'bold'; italic?: boolean; outlineColor?: string; outlineWidth?: number };
-export type ProjectDocument = { version: 1; project: { id: string; name: string }; canvas: { width: number; height: number; fps: number; background: string }; tracks: Track[]; clips: TimelineClip[]; assets: MediaAsset[]; effects: AppliedEffect[]; textOverlays: TextOverlay[]; settings: Record<string, unknown> };
+export type ProjectDocument = { version: 1; project: { id: string; name: string }; canvas: { width: number; height: number; fps: number; background: string }; tracks: Track[]; clips: TimelineClip[]; assets: MediaAsset[]; effects: AppliedEffect[]; colorAdjustments: Record<string, ColorAdjustment>; textOverlays: TextOverlay[]; settings: Record<string, unknown> };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+const colorAdjustmentFields: (keyof ColorAdjustment)[] = ['exposure', 'contrast', 'saturation', 'temperature', 'tint'];
 
 function validKeyframes(value: unknown, duration: number): value is ClipKeyframe[] {
   if (!Array.isArray(value)) return false;
@@ -46,12 +47,13 @@ export function parseProjectDocument(value: unknown): ProjectDocument {
     !document.assets.every((asset) => isRecord(asset) && typeof asset.id === 'string' && typeof asset.name === 'string' && ['video', 'image', 'audio'].includes(String(asset.kind)) && typeof asset.mimeType === 'string' && Number.isFinite(asset.size) && (asset.cloudId === undefined || typeof asset.cloudId === 'string')) ||
     (document.effects !== undefined && (!Array.isArray(document.effects) || !document.effects.every((effect) => isRecord(effect) && typeof effect.id === 'string' && typeof effect.assetId === 'string' && assets.some((asset) => isRecord(asset) && asset.id === effect.assetId) && ['vivid', 'monochrome', 'vintage', 'soft-focus', 'warm-glow', 'cool-tone', 'vignette'].includes(String(effect.type)) && typeof effect.strength === 'number' && Number.isFinite(effect.strength) && effect.strength >= 0 && effect.strength <= 100 && typeof effect.enabled === 'boolean'))) ||
     (document.textOverlays !== undefined && (!Array.isArray(document.textOverlays) || !document.textOverlays.every((overlay) => isRecord(overlay) && typeof overlay.id === 'string' && ['title', 'caption'].includes(String(overlay.kind)) && typeof overlay.text === 'string' && overlay.text.trim().length > 0 && Number.isFinite(overlay.start) && Number(overlay.start) >= 0 && Number.isFinite(overlay.duration) && Number(overlay.duration) > 0 && ['top', 'center', 'bottom'].includes(String(overlay.position)) && Number.isFinite(overlay.fontSize) && Number(overlay.fontSize) >= 14 && Number(overlay.fontSize) <= 160 && typeof overlay.color === 'string' && (overlay.fontFamily === undefined || ['Manrope', 'Arial', 'Georgia'].includes(String(overlay.fontFamily))) && (overlay.fontWeight === undefined || ['normal', 'bold'].includes(String(overlay.fontWeight))) && (overlay.italic === undefined || typeof overlay.italic === 'boolean') && (overlay.outlineColor === undefined || typeof overlay.outlineColor === 'string') && (overlay.outlineWidth === undefined || (Number.isFinite(overlay.outlineWidth) && Number(overlay.outlineWidth) >= 0 && Number(overlay.outlineWidth) <= 12))))) ||
+    (document.colorAdjustments !== undefined && (!isRecord(document.colorAdjustments) || Object.entries(document.colorAdjustments).some(([assetId, adjustment]) => !assets.some((asset) => isRecord(asset) && asset.id === assetId) || !isRecord(adjustment) || colorAdjustmentFields.some((field) => !Number.isFinite(adjustment[field]) || Number(adjustment[field]) < -100 || Number(adjustment[field]) > 100)))) ||
     !document.settings ||
     !isRecord(document.settings)
   ) {
     throw new Error('This project document is not a supported Frameforge version.');
   }
-  return { ...document, effects: document.effects ?? [], textOverlays: document.textOverlays ?? [] } as ProjectDocument;
+  return { ...document, effects: document.effects ?? [], colorAdjustments: document.colorAdjustments ?? {}, textOverlays: document.textOverlays ?? [] } as ProjectDocument;
 }
 
 export const makeProject = (): ProjectDocument => ({
@@ -63,7 +65,7 @@ export const makeProject = (): ProjectDocument => ({
     { id: 'text-1', name: 'Text & graphics', kind: 'text', color: '#49bca6', muted: false, hidden: false, locked: false },
     { id: 'audio-1', name: 'Audio 1', kind: 'audio', color: '#eaa65c', muted: false, hidden: false, locked: false },
   ],
-  clips: [], assets: [], effects: [], textOverlays: [], settings: {},
+  clips: [], assets: [], effects: [], colorAdjustments: {}, textOverlays: [], settings: {},
 });
 
 export const formatTime = (seconds: number) => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${Math.floor(seconds % 60).toString().padStart(2, '0')}.${Math.floor((seconds % 1) * 10)}`;

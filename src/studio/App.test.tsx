@@ -423,6 +423,16 @@ describe('editor media and timeline flow', () => {
     fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
     await screen.findByRole('slider', { name: 'Vivid intensity' });
     expect(video.style.filter).toBe('saturate(1.6)');
+
+    fireEvent.change(screen.getByRole('slider', { name: 'Exposure' }), { target: { value: '25' } });
+    fireEvent.change(screen.getByRole('slider', { name: 'Saturation' }), { target: { value: '-15' } });
+    expect(video.style.filter).toBe('brightness(1.25) saturate(0.85) saturate(1.6)');
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.colorAdjustments[saved.assets[0].id]).toMatchObject({ exposure: 25, saturation: -15 });
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Reset color' }));
+    expect(video.style.filter).toBe('saturate(1.6)');
   });
 
   it('lists and opens an account project while keeping its cloud identity for future saves', async () => {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Pencil, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
 import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
-import { audioGainAt, renderProjectVideo } from './export';
+import { audioGainAt, renderEditedImage, renderProjectVideo } from './export';
 import { authenticate, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';
 import { readMedia, storeMedia } from './mediaStore';
 import { decodeAudioWaveform, waveformPeaksForClip, type AudioWaveform } from './waveform';
@@ -135,6 +135,7 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportingImage, setExportingImage] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportError, setExportError] = useState('');
   const [localProjects, setLocalProjects] = useState<{ id: string; name: string; updatedAt: string }[]>(() => { try { return JSON.parse(localStorage.getItem('frameforge:projects-index') ?? '[]'); } catch { return []; } });
@@ -850,6 +851,20 @@ export default function App() {
       setExporting(false);
     }
   }
+  async function startImageExport() {
+    if (!selectedAsset || selectedAsset.kind !== 'image') return;
+    setExportingImage(true);
+    try {
+      const blob = await renderEditedImage(selectedAsset, project);
+      const safeName = selectedAsset.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'image';
+      downloadExport(blob, `${safeName}-edited.png`);
+      setNotice('Edited image downloaded as PNG at its original dimensions.');
+    } catch (error) {
+      setNotice(`Image export failed: ${(error as Error).message}`);
+    } finally {
+      setExportingImage(false);
+    }
+  }
 
   const toolTitle: Record<ToolId, string> = { media: 'Project media', audio: 'Audio library', text: 'Typography', captions: 'Captions', elements: 'Elements', effects: 'Effects', transitions: 'Transitions', ai: 'AI studio' };
 
@@ -948,6 +963,7 @@ export default function App() {
                 <input id={`effect-strength-${effect.id}`} aria-label={`${definition.name} intensity`} type="range" min="0" max="100" step="1" value={effect.strength} disabled={!effect.enabled} onChange={(event) => updateEffect(effect.id, { strength: Number(event.target.value) })}/>
               </section>;
             })}</div> : <div className="effects-empty applied-empty">No effects yet. Choose one above to add it to this asset.</div>}
+            {selectedAsset.kind === 'image' && <button className="color-adjustment-reset" disabled={exportingImage} onClick={() => void startImageExport()}>{exportingImage ? 'Rendering PNG…' : 'Export edited image (PNG)'}</button>}
           </>}
         </div> : activeTool === 'text' || activeTool === 'captions' || activeTool === 'transitions' || activeTool === 'ai'
           ? <CreativeToolsPanel

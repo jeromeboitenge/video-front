@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import App from './App';
 import { readMedia, storeMedia } from './mediaStore';
 import { makeProject, parseProjectDocument } from './model';
-import { renderProjectVideo } from './export';
+import { renderEditedImage, renderProjectVideo } from './export';
 import { decodeAudioWaveform } from './waveform';
 
 vi.mock('./mediaStore', () => ({
@@ -12,6 +12,7 @@ vi.mock('./mediaStore', () => ({
 }));
 vi.mock('./export', async (importOriginal) => ({
   ...await importOriginal<typeof import('./export')>(),
+  renderEditedImage: vi.fn(),
   renderProjectVideo: vi.fn(),
 }));
 vi.mock('./waveform', async (importOriginal) => ({
@@ -51,6 +52,29 @@ describe('editor media and timeline flow', () => {
       expect(saved.canvas.background).toBe('#ff0000');
       expect(saved.settings.safeMargins).toBe(true);
     });
+  });
+
+  it('exports selected image assets with their current non-destructive adjustments', async () => {
+    const exportBlob = new Blob(['edited-image'], { type: 'image/png' });
+    vi.mocked(renderEditedImage).mockResolvedValue(exportBlob);
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    render(<App />);
+
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(fileInput).not.toBeNull();
+    fireEvent.change(fileInput!, { target: { files: [new File(['image'], 'poster.png', { type: 'image/png' })] } });
+    await waitFor(() => expect(document.querySelector('.asset-row strong')?.textContent).toBe('poster.png'));
+    fireEvent.click(screen.getByRole('button', { name: 'Effects' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add Vivid' }));
+    fireEvent.change(screen.getByRole('slider', { name: 'Exposure' }), { target: { value: '24' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Export edited image (PNG)' }));
+
+    await waitFor(() => expect(renderEditedImage).toHaveBeenCalledTimes(1));
+    const [asset, exportedProject] = vi.mocked(renderEditedImage).mock.calls[0];
+    expect(asset).toMatchObject({ name: 'poster.png', kind: 'image' });
+    expect(exportedProject.effects).toContainEqual(expect.objectContaining({ assetId: asset.id, type: 'vivid' }));
+    expect(exportedProject.colorAdjustments[asset.id].exposure).toBe(24);
+    expect(document.querySelector('.toast')?.textContent).toContain('Edited image downloaded as PNG');
   });
 
   it('rejects visual transform values outside supported bounds', () => {
@@ -175,7 +199,7 @@ describe('editor media and timeline flow', () => {
     render(<App />);
     fireEvent.change(screen.getByRole('combobox', { name: 'Canvas aspect ratio' }), { target: { value: 'landscape' } });
     expect(screen.getByRole('combobox', { name: 'Inspector canvas preset' })).toHaveProperty('value', 'landscape');
-    expect(screen.getByText('Landscape 16:9')).toBeTruthy();
+    expect(document.querySelector('.canvas-preset-select')?.textContent).toContain('Landscape 16:9');
     expect(document.querySelector<HTMLElement>('.canvas-frame')?.style.aspectRatio).toBe('1920 / 1080');
 
     fireEvent.change(screen.getByRole('combobox', { name: 'Frame rate' }), { target: { value: '60' } });
@@ -540,6 +564,7 @@ describe('editor media and timeline flow', () => {
   beforeEach(() => {
     vi.mocked(storeMedia).mockResolvedValue(undefined);
     vi.mocked(readMedia).mockResolvedValue(undefined);
+    vi.mocked(renderEditedImage).mockResolvedValue(new Blob(['edited'], { type: 'image/png' }));
     vi.mocked(renderProjectVideo).mockResolvedValue(new Blob(['rendered'], { type: 'video/webm' }));
     Object.defineProperty(window, 'PointerEvent', { configurable: true, value: MouseEvent });
     localStorage.clear();

@@ -1,8 +1,37 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { clipDurationAtSpeed, clipOpacityAt, clipSourceTimeAt, clipTransformAt, makeProject, MAX_CANVAS_PIXELS, parseProjectDocument } from './model';
-import { applyClipTransform, audioGainAt, audioGainFor, createExportPlan } from './export';
+import { applyClipTransform, audioGainAt, audioGainFor, createExportPlan, drawEditedImage } from './export';
 
 describe('video export plan', () => {
+  it('draws image adjustments and vignette effects into the still-image export canvas', () => {
+    const filterValues: string[] = [];
+    const stops: [number, string][] = [];
+    const gradient = { addColorStop: (offset: number, color: string) => stops.push([offset, color]) };
+    const drawImage = vi.fn();
+    const createRadialGradient = vi.fn(() => gradient);
+    const context = {
+      save: vi.fn(),
+      restore: vi.fn(),
+      drawImage,
+      createRadialGradient,
+      fillRect: vi.fn(),
+      set filter(value: string) { filterValues.push(value); },
+      set fillStyle(_value: string | CanvasGradient | CanvasPattern) {},
+    } as unknown as CanvasRenderingContext2D;
+    const source = {} as CanvasImageSource;
+
+    drawEditedImage(context, source, 100, 200, 'image-1', [
+      { id: 'vivid', assetId: 'image-1', type: 'vivid', strength: 100, enabled: true },
+      { id: 'vignette', assetId: 'image-1', type: 'vignette', strength: 50, enabled: true },
+    ], { exposure: 10, contrast: 0, saturation: 0, temperature: 0, tint: 0 });
+
+    expect(filterValues).toEqual(['brightness(1.1) saturate(1.8)']);
+    expect(drawImage).toHaveBeenCalledWith(source, 0, 0, 100, 200);
+    expect(createRadialGradient).toHaveBeenCalledWith(50, 100, 32, 50, 100, 144);
+    expect(stops).toEqual([[0, 'rgba(0,0,0,0)'], [1, 'rgba(0,0,0,0.39)']]);
+    expect(context.fillRect).toHaveBeenCalledWith(0, 0, 100, 200);
+  });
+
   it('accepts supported canvas formats and rejects unsafe dimensions and frame rates', () => {
     const project = makeProject();
     project.canvas = { ...project.canvas, width: 1920, height: 1080, fps: 60 };

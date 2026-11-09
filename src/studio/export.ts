@@ -1,5 +1,5 @@
 import { getCloudMediaContent } from './api';
-import { effectStyle } from './effects';
+import { effectStyle, type AppliedEffect, type ColorAdjustment } from './effects';
 import { clipOpacityAt, clipSourceTimeAt, clipTransformAt, clipVisualOpacityAt, MAX_CLIP_SPEED, MIN_CLIP_SPEED, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
 import { readMedia } from './mediaStore';
 
@@ -82,6 +82,51 @@ async function loadAsset(asset: MediaAsset, signal: AbortSignal): Promise<Blob> 
   if (asset.cloudId && sessionStorage.getItem('frameforge:access-token')) return getCloudMediaContent(asset.cloudId);
   if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
   throw new Error(`"${asset.name}" is unavailable on this device. Reimport it before exporting.`);
+}
+
+export function drawEditedImage(
+  context: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  width: number,
+  height: number,
+  assetId: string,
+  effects: AppliedEffect[],
+  adjustment: ColorAdjustment | undefined,
+): void {
+  const effect = effectStyle(effects, assetId, adjustment);
+  context.save();
+  context.filter = effect.filter ?? 'none';
+  context.drawImage(source, 0, 0, width, height);
+  context.restore();
+
+  if (effect.vignette > 0) {
+    const gradient = context.createRadialGradient(width / 2, height / 2, height * 0.16, width / 2, height / 2, height * 0.72);
+    gradient.addColorStop(0, 'rgba(0,0,0,0)');
+    gradient.addColorStop(1, `rgba(0,0,0,${effect.vignette * 0.78})`);
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, width, height);
+  }
+}
+
+export async function renderEditedImage(asset: MediaAsset, project: ProjectDocument): Promise<Blob> {
+  if (asset.kind !== 'image') throw new Error('PNG export is only available for image assets.');
+  if (typeof createImageBitmap !== 'function') throw new Error('This browser does not support image export. Use a current version of Chrome, Edge, or Firefox.');
+
+  const bitmap = await createImageBitmap(await loadAsset(asset, new AbortController().signal));
+  try {
+    if (!bitmap.width || !bitmap.height) throw new Error(`Could not decode "${asset.name}" for export.`);
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Could not initialize the image rendering canvas.');
+    drawEditedImage(context, bitmap, canvas.width, canvas.height, asset.id, project.effects, project.colorAdjustments[asset.id]);
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('The browser could not encode the edited image as PNG.')), 'image/png');
+    });
+  } finally {
+    bitmap.close();
+  }
 }
 
 function waitForMedia(media: HTMLMediaElement, assetName: string): Promise<void> {

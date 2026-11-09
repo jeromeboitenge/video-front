@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
-import { AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
-import { clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, makeProject, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId } from './model';
+import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Pencil, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
+import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
 import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
 import { audioGainAt, renderProjectVideo } from './export';
 import { authenticate, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';
 import { readMedia, storeMedia } from './mediaStore';
+import { decodeAudioWaveform, waveformPeaksForClip, type AudioWaveform } from './waveform';
 import { CreativeToolsPanel } from './CreativeToolsPanel';
 import { AdminPanel, OrganizationRequestForm, SupportTicketForm } from './AdminPanel';
 import './export.css';
@@ -72,6 +73,18 @@ function TimelineComposition({ items, mediaUrls, effects, colorAdjustments, over
   </div>;
 }
 
+function canvasPresetId(width: number, height: number): string {
+  return CANVAS_PRESETS.find((preset) => preset.width === width && preset.height === height)?.id ?? 'custom';
+}
+
+function TimelineClipWaveform({ waveform, clip, assetName }: { waveform: AudioWaveform | null | undefined; clip: TimelineClip; assetName: string }) {
+  if (waveform === undefined) return <span className="clip-wave" role="img" aria-label={`Loading waveform for ${assetName}`}><span className="clip-wave-status">Loading waveform</span></span>;
+  if (waveform === null) return <span className="clip-wave clip-wave-error" role="img" aria-label={`Waveform unavailable for ${assetName}`}><span className="clip-wave-status">Waveform unavailable</span></span>;
+  return <span className="clip-wave" role="img" aria-label={`Waveform for ${assetName}`}>
+    {waveformPeaksForClip(waveform, clip).map((peak, index) => <i key={index} data-testid="waveform-bar" style={{ height: `${Math.max(2, peak * 15)}px` }}/>)}
+  </span>;
+}
+
 export default function App() {
   const [project, setProject] = useState<ProjectDocument>(() => {
     try {
@@ -89,10 +102,13 @@ export default function App() {
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [notice, setNotice] = useState('');
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({});
+  const [audioWaveforms, setAudioWaveforms] = useState<Record<string, AudioWaveform | null>>({});
   const [loadingAssetId, setLoadingAssetId] = useState<string | null>(null);
   const [importingMedia, setImportingMedia] = useState(false);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [trackManagerOpen, setTrackManagerOpen] = useState(false);
+  const [trackNames, setTrackNames] = useState<Record<string, string>>({});
   const [accountOpen, setAccountOpen] = useState(false);
   const [organizationRequestOpen, setOrganizationRequestOpen] = useState(false);
   const [supportTicketOpen, setSupportTicketOpen] = useState(false);
@@ -378,6 +394,37 @@ export default function App() {
   useEffect(() => () => { Object.values(mediaUrlMap.current).forEach(URL.revokeObjectURL); }, []);
 
   useEffect(() => {
+    const audioTrackIds = new Set(project.tracks.filter((track) => track.kind === 'audio').map((track) => track.id));
+    const audioAssetIds = new Set(project.clips
+      .filter((clip) => audioTrackIds.has(clip.trackId))
+      .map((clip) => clip.assetId));
+    const assets = project.assets.filter((asset) =>
+      asset.kind === 'audio' &&
+      audioAssetIds.has(asset.id) &&
+      !!mediaUrls[asset.id] &&
+      audioWaveforms[asset.id] === undefined,
+    );
+    if (!assets.length) return;
+
+    void (async () => {
+      const results: Record<string, AudioWaveform | null> = {};
+      const failures: string[] = [];
+      for (const asset of assets) {
+        try {
+          const blob = await readMedia(asset.id);
+          if (!blob) throw new Error('The original file is not available on this device.');
+          results[asset.id] = await decodeAudioWaveform(blob);
+        } catch (error) {
+          results[asset.id] = null;
+          failures.push(`${asset.name}: ${(error as Error).message}`);
+        }
+      }
+      setAudioWaveforms((previous) => ({ ...previous, ...results }));
+      if (failures.length) setNotice(`Could not create audio waveform. ${failures.join(' ')}`);
+    })();
+  }, [audioWaveforms, mediaUrls, project.assets, project.clips, project.tracks]);
+
+  useEffect(() => {
     if (!sessionStorage.getItem('frameforge:access-token') || !cloudProjectId) return;
     const timer = window.setTimeout(() => {
       void saveCloudProject(project.project.name, project, cloudProjectId).catch((error: Error) => setNotice(`Cloud save failed: ${error.message}`));
@@ -416,6 +463,60 @@ export default function App() {
   function commit(next: ProjectDocument) { undoStack.current.push(project); redoStack.current = []; setProject(next); setSaved(false); }
   function undo() { const prior = undoStack.current.pop(); if (prior) { redoStack.current.push(project); setProject(prior); setSaved(false); } }
   function redo() { const next = redoStack.current.pop(); if (next) { undoStack.current.push(project); setProject(next); setSaved(false); } }
+  function addTrack(kind: 'video' | 'audio') {
+    const label = kind === 'video' ? 'Video' : 'Audio';
+    let number = 1;
+    while (project.tracks.some((track) => track.name === `${label} ${number}`)) number += 1;
+    const track: Track = {
+      id: crypto.randomUUID(),
+      name: `${label} ${number}`,
+      kind,
+      color: kind === 'video' ? '#ad7dff' : '#eaa65c',
+      muted: false,
+      hidden: false,
+      locked: false,
+    };
+    commit({ ...project, tracks: [...project.tracks, track] });
+    setNotice(`${track.name} track added.`);
+  }
+  function moveTrack(trackId: string, direction: -1 | 1) {
+    const index = project.tracks.findIndex((track) => track.id === trackId);
+    const destination = index + direction;
+    if (index < 0 || destination < 0 || destination >= project.tracks.length) return;
+    const tracks = [...project.tracks];
+    [tracks[index], tracks[destination]] = [tracks[destination], tracks[index]];
+    commit({ ...project, tracks });
+  }
+  function renameTrack(trackId: string, draft: string) {
+    const name = draft.trim();
+    if (!name) {
+      setNotice('Track name cannot be empty.');
+      return;
+    }
+    const track = project.tracks.find((item) => item.id === trackId);
+    if (!track) return;
+    if (track.name === name) return;
+    commit({ ...project, tracks: project.tracks.map((item) => item.id === trackId ? { ...item, name } : item) });
+    setTrackNames((previous) => ({ ...previous, [trackId]: name }));
+    setNotice(`Track renamed to ${name}.`);
+  }
+  function deleteTrack(trackId: string) {
+    const track = project.tracks.find((item) => item.id === trackId);
+    if (!track) return;
+    const trackClips = project.clips.filter((clip) => clip.trackId === trackId);
+    const clipSummary = trackClips.length === 1 ? '1 clip' : `${trackClips.length} clips`;
+    if (!window.confirm(`Delete "${track.name}" and its ${clipSummary}? You can undo this action.`)) return;
+    commit({
+      ...project,
+      tracks: project.tracks.filter((item) => item.id !== trackId),
+      clips: project.clips.filter((clip) => clip.trackId !== trackId),
+    });
+    if (trackClips.some((clip) => clip.id === selectedClipId)) {
+      setSelectedClipId(null);
+      setPlaying(false);
+    }
+    setNotice(`${track.name} and its ${clipSummary} deleted.`);
+  }
   function togglePlayback() {
     if (playing) {
       setPlaying(false);
@@ -504,6 +605,19 @@ export default function App() {
         [selectedAsset.id]: { ...selectedColorAdjustment, ...patch },
       },
     });
+  }
+  function updateCanvasPreset(presetId: string) {
+    const preset = CANVAS_PRESETS.find((item) => item.id === presetId);
+    if (!preset) return;
+    commit({ ...project, canvas: { ...project.canvas, width: preset.width, height: preset.height } });
+  }
+  function updateCanvasDimension(field: 'width' | 'height', value: number) {
+    if (!Number.isInteger(value) || value < 1 || value > MAX_CANVAS_DIMENSION || value * (field === 'width' ? project.canvas.height : project.canvas.width) > MAX_CANVAS_PIXELS) return;
+    commit({ ...project, canvas: { ...project.canvas, [field]: value } });
+  }
+  function updateFrameRate(value: number) {
+    if (!FRAME_RATE_PRESETS.some((fps) => fps === value)) return;
+    commit({ ...project, canvas: { ...project.canvas, fps: value } });
   }
   function addTextOverlays(overlays: TextOverlay[]) {
     if (!overlays.length) return;
@@ -847,10 +961,10 @@ export default function App() {
       </aside>
 
       <section className="editor-main">
-        <div className="canvas-toolbar"><div className="canvas-select"><span className="canvas-dot"/><span>Canvas</span><span className="toolbar-muted">·</span><button>Portrait 9:16 <ChevronDown size={12}/></button><button className="mobile-import" onClick={() => fileRef.current?.click()}><Upload size={14}/>Import</button></div><div className="canvas-tools"><button className="tool-chip"><Frame size={14}/>Safe area</button><span className="toolbar-separator"/><button className="icon-button tiny" title="Zoom out" onClick={() => setCanvasZoom((value) => Math.max(0.5, value - 0.1))}><ZoomOut size={15}/></button><button className="zoom-value" onClick={() => setCanvasZoom(1)}>{Math.round(canvasZoom * 100)}%</button><button className="icon-button tiny" title="Zoom in" onClick={() => setCanvasZoom((value) => Math.min(1.5, value + 0.1))}><ZoomIn size={15}/></button><button className="icon-button tiny" title="Fit to screen" onClick={() => setCanvasZoom(1)}><Maximize2 size={14}/></button></div></div>
+        <div className="canvas-toolbar"><div className="canvas-select"><span className="canvas-dot"/><span>Canvas</span><span className="toolbar-muted">·</span><label className="canvas-preset-select"><select aria-label="Canvas aspect ratio" value={canvasPresetId(project.canvas.width, project.canvas.height)} onChange={(event) => updateCanvasPreset(event.target.value)}>{CANVAS_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}<option value="custom" disabled>Custom {project.canvas.width} × {project.canvas.height}</option></select><ChevronDown size={12}/></label><button className="mobile-import" onClick={() => fileRef.current?.click()}><Upload size={14}/>Import</button></div><div className="canvas-tools"><button className="tool-chip"><Frame size={14}/>Safe area</button><span className="toolbar-separator"/><button className="icon-button tiny" title="Zoom out" onClick={() => setCanvasZoom((value) => Math.max(0.5, value - 0.1))}><ZoomOut size={15}/></button><button className="zoom-value" onClick={() => setCanvasZoom(1)}>{Math.round(canvasZoom * 100)}%</button><button className="icon-button tiny" title="Zoom in" onClick={() => setCanvasZoom((value) => Math.min(1.5, value + 0.1))}><ZoomIn size={15}/></button><button className="icon-button tiny" title="Fit to screen" onClick={() => setCanvasZoom(1)}><Maximize2 size={14}/></button></div></div>
         <div className="preview-stage">
           <div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/>
-          <div className="canvas-frame" style={{ transform: `scale(${canvasZoom})` }}>
+          <div className="canvas-frame" style={{ aspectRatio: `${project.canvas.width} / ${project.canvas.height}`, transform: `scale(${canvasZoom})` }}>
             <div className="canvas-gradient">
               {previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} colorAdjustments={project.colorAdjustments} overlays={project.textOverlays} playhead={playhead} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
                 {selectedAsset.kind === 'video' ? <video src={mediaUrls[selectedAsset.id]} style={{ filter: previewEffect.filter }} playsInline controls/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name} style={{ filter: previewEffect.filter }}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls/></div>}
@@ -865,12 +979,60 @@ export default function App() {
         <div className="transport"><div className="transport-left"><button className="icon-button" title="Go to start" aria-label="Go to start" onClick={() => { setPlaying(false); setPreviewMode('timeline'); setPlayhead(0); }}><span className="skip-start">|◀</span></button><button className="play-button" title="Play / pause · Space" aria-label="Play / pause · Space" onClick={togglePlayback}>{playing ? <Pause size={16} fill="currentColor"/> : <Play size={16} fill="currentColor"/>}</button><button className="icon-button" title="Step forward" aria-label="Step forward" onClick={() => { setPlaying(false); setPreviewMode('timeline'); setPlayhead((time) => Math.min(sequenceDuration, time + 1 / project.canvas.fps)); }}><span className="skip-next">▶|</span></button><span className="transport-time"><strong>{formatTime(playhead)}</strong><span> / {formatTime(sequenceDuration || duration)}</span></span></div><div className="transport-right"><button className="icon-button" title={previewMuted ? 'Unmute preview' : 'Mute preview'} aria-label={previewMuted ? 'Unmute preview' : 'Mute preview'} aria-pressed={previewMuted} onClick={() => setPreviewMuted((muted) => !muted)}><Volume2 size={15} opacity={previewMuted ? .45 : 1}/></button><span className="toolbar-separator"/><button className="icon-button" title="Playback quality"><Gauge size={15}/></button><button className="quality-label">Full quality <ChevronDown size={12}/></button></div></div>
         <section className="timeline">
           <div className="timeline-header"><div className="timeline-title"><span className="eyebrow">SEQUENCE</span><strong>Timeline</strong><span className="timeline-pill">{project.tracks.length} tracks</span></div><div className="timeline-actions">{selectedClip && <><button className="tool-chip" onClick={splitSelectedClip}><Scissors size={14}/>Split</button><button className="icon-button tiny" title="Duplicate clip · Ctrl D" onClick={duplicateSelectedClip}><Copy size={14}/></button><button className="icon-button tiny" title="Delete clip" onClick={deleteSelectedClip}><Trash2 size={14}/></button></>}<button className="icon-button tiny" title="Timeline settings"><Settings2 size={15}/></button><span className="toolbar-separator"/><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.max(0.5, value - 0.1))} title="Zoom out timeline"><ZoomOut size={15}/></button><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.min(1.5, value + 0.1))} title="Zoom in timeline"><ZoomIn size={15}/></button></div></div>
-          <div className="timeline-body"><div className="track-labels"><div className="ruler-spacer"><button title="Add track" onClick={() => { const id = crypto.randomUUID(); commit({ ...project, tracks: [...project.tracks, { id, name: `Video ${project.tracks.length + 1}`, kind: 'video', color: '#ad7dff', muted: false, hidden: false, locked: false }] }); }}><Plus size={15}/></button></div>{project.tracks.map((track, index) => <div className="track-label" key={track.id}><span className="track-color" style={{ background: track.color }}/><span className="track-name">{track.name}</span><button title={track.kind === 'audio' ? 'Mute track' : 'Hide track'} onClick={() => commit({ ...project, tracks: project.tracks.map((item, i) => i === index ? { ...item, [item.kind === 'audio' ? 'muted' : 'hidden']: !item[item.kind === 'audio' ? 'muted' : 'hidden'] } : item) })}>{track.kind === 'audio' ? <Volume2 size={13} opacity={track.muted ? .4 : 1}/> : <Square size={12} opacity={track.hidden ? .4 : 1}/>}</button><button title="Lock track" onClick={() => commit({ ...project, tracks: project.tracks.map((item, i) => i === index ? { ...item, locked: !item.locked } : item) })}><LockKeyhole size={12} opacity={track.locked ? 1 : .5}/></button></div>)}</div>
-            <div className="timeline-scroll"><div className="timeline-content" style={{ width: `${100 * timelineZoom}%`, minWidth: `${450 * timelineZoom}px` }} onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); setPreviewMode('timeline'); setPlayhead(Math.max(0, Math.min(duration, (event.clientX - bounds.left) / bounds.width * duration))); }}><div className="ruler">{rulerMarks.map((mark) => <div key={mark} className="ruler-mark" style={{ left: `${mark / duration * 100}%` }}><i/><span>{formatTime(mark)}</span></div>)}</div>{project.tracks.map((track) => <div className="track-lane" data-track-id={track.id} key={track.id}><div className="lane-grid"/>{project.clips.filter((clip) => clip.trackId === track.id).map((clip) => { const asset = project.assets.find((item) => item.id === clip.assetId); if (!asset) return null; return <button className={`clip ${clip.id === selectedClipId ? 'clip-selected' : ''}`} key={clip.id} disabled={track.locked} style={{ left: `${clip.start / duration * 100}%`, width: `${Math.max(8, clip.duration / duration * 100)}%`, borderColor: `${track.color}77`, background: `linear-gradient(100deg, ${track.color}38, ${track.color}20)` }} onPointerDown={(event) => startTimelineDrag(event, clip)} onClick={(event) => { event.stopPropagation(); setPlaying(false); setPreviewMode('timeline'); setSelectedClipId(clip.id); setSelectedAssetId(asset.id); setPlayhead(clip.start); setNotice(`${asset.name} selected.`); }}><span className="clip-trim-handle" data-trim-handle="start" role="slider" aria-label={`Trim start of ${asset.name}`} aria-valuemin={0} aria-valuenow={clip.start}/><span className="clip-grip"/><span className="clip-icon">{asset.kind === 'audio' ? <AudioLines size={13}/> : <Film size={13}/>}</span><span className="clip-name">{asset.name}</span><span className="clip-wave">{track.kind === 'audio' && Array.from({ length: 25 }, (_, k) => <i key={k} style={{ height: `${20 + Math.abs(Math.sin(k * 2.4)) * 65}%` }}/>)}</span><span className="clip-grip end"/><span className="clip-trim-handle end" data-trim-handle="end" role="slider" aria-label={`Trim end of ${asset.name}`} aria-valuemin={0} aria-valuenow={clip.duration}/></button>; })}</div>)}<div className="playhead" style={{ left: `${playhead / duration * 100}%` }}><i/></div></div><button className="timeline-add-track" onClick={() => { const id = crypto.randomUUID(); commit({ ...project, tracks: [...project.tracks, { id, name: `Track ${project.tracks.length + 1}`, kind: 'video', color: '#ad7dff', muted: false, hidden: false, locked: false }] }); }}><Plus size={14}/></button></div></div>
+          <div className="track-type-actions" aria-label="Add track">
+            <button onClick={() => addTrack('video')}><Film size={13}/>Add video track</button>
+            <button onClick={() => addTrack('audio')}><Music2 size={13}/>Add audio track</button>
+            <button aria-expanded={trackManagerOpen} onClick={() => setTrackManagerOpen((open) => !open)}><Settings2 size={13}/>{trackManagerOpen ? 'Close track manager' : 'Manage tracks'}</button>
+          </div>
+          {trackManagerOpen && <div className="track-management-panel" aria-label="Track management">
+            {project.tracks.map((track, index) => <form className="track-management-row" key={track.id} onSubmit={(event) => { event.preventDefault(); renameTrack(track.id, trackNames[track.id] ?? track.name); }}>
+              <span className="track-color" style={{ background: track.color }}/>
+              <input aria-label={`Track name ${track.name}`} value={trackNames[track.id] ?? track.name} maxLength={80} onChange={(event) => { const name = event.currentTarget.value; setTrackNames((previous) => ({ ...previous, [track.id]: name })); }}/>
+              <button type="submit" aria-label={`Save track name ${track.name}`} title="Save track name"><Pencil size={12}/></button>
+              <button type="button" aria-label={`Move ${track.name} up`} title="Move track up" disabled={index === 0} onClick={() => moveTrack(track.id, -1)}><ArrowUp size={12}/></button>
+              <button type="button" aria-label={`Move ${track.name} down`} title="Move track down" disabled={index === project.tracks.length - 1} onClick={() => moveTrack(track.id, 1)}><ArrowDown size={12}/></button>
+              <button type="button" className="track-delete" aria-label={`Delete ${track.name}`} title="Delete track" onClick={() => deleteTrack(track.id)}><Trash2 size={12}/></button>
+            </form>)}
+          </div>}
+          <div className="timeline-body"><div className="track-labels"><div className="ruler-spacer"><button title="Add track" onClick={() => addTrack('video')}><Plus size={15}/></button></div>{project.tracks.map((track, index) => <div className="track-label" key={track.id}><span className="track-color" style={{ background: track.color }}/><span className="track-name">{track.name}</span><button title={track.kind === 'audio' ? 'Mute track' : 'Hide track'} onClick={() => commit({ ...project, tracks: project.tracks.map((item, i) => i === index ? { ...item, [item.kind === 'audio' ? 'muted' : 'hidden']: !item[item.kind === 'audio' ? 'muted' : 'hidden'] } : item) })}>{track.kind === 'audio' ? <Volume2 size={13} opacity={track.muted ? .4 : 1}/> : <Square size={12} opacity={track.hidden ? .4 : 1}/>}</button><button title="Lock track" onClick={() => commit({ ...project, tracks: project.tracks.map((item, i) => i === index ? { ...item, locked: !item.locked } : item) })}><LockKeyhole size={12} opacity={track.locked ? 1 : .5}/></button></div>)}</div>
+            <div className="timeline-scroll"><div className="timeline-content" style={{ width: `${100 * timelineZoom}%`, minWidth: `${450 * timelineZoom}px` }} onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); setPreviewMode('timeline'); setPlayhead(Math.max(0, Math.min(duration, (event.clientX - bounds.left) / bounds.width * duration))); }}><div className="ruler">{rulerMarks.map((mark) => <div key={mark} className="ruler-mark" style={{ left: `${mark / duration * 100}%` }}><i/><span>{formatTime(mark)}</span></div>)}</div>{project.tracks.map((track) => <div className="track-lane" data-track-id={track.id} key={track.id}><div className="lane-grid"/>{project.clips.filter((clip) => clip.trackId === track.id).map((clip) => { const asset = project.assets.find((item) => item.id === clip.assetId); if (!asset) return null; return <button className={`clip ${clip.id === selectedClipId ? 'clip-selected' : ''}`} key={clip.id} disabled={track.locked} style={{ left: `${clip.start / duration * 100}%`, width: `${Math.max(8, clip.duration / duration * 100)}%`, borderColor: `${track.color}77`, background: `linear-gradient(100deg, ${track.color}38, ${track.color}20)` }} onPointerDown={(event) => startTimelineDrag(event, clip)} onClick={(event) => { event.stopPropagation(); setPlaying(false); setPreviewMode('timeline'); setSelectedClipId(clip.id); setSelectedAssetId(asset.id); setPlayhead(clip.start); setNotice(`${asset.name} selected.`); }}><span className="clip-trim-handle" data-trim-handle="start" role="slider" aria-label={`Trim start of ${asset.name}`} aria-valuemin={0} aria-valuenow={clip.start}/><span className="clip-grip"/><span className="clip-icon">{asset.kind === 'audio' ? <AudioLines size={13}/> : <Film size={13}/>}</span><span className="clip-name">{asset.name}</span>{track.kind === 'audio' && asset.kind === 'audio' && <TimelineClipWaveform waveform={audioWaveforms[asset.id]} clip={clip} assetName={asset.name}/>}<span className="clip-grip end"/><span className="clip-trim-handle end" data-trim-handle="end" role="slider" aria-label={`Trim end of ${asset.name}`} aria-valuemin={0} aria-valuenow={clip.duration}/></button>; })}</div>)}<div className="playhead" style={{ left: `${playhead / duration * 100}%` }}><i/></div></div><button className="timeline-add-track" onClick={() => addTrack('video')}><Plus size={14}/></button></div></div>
             <div className="timeline-footer"><span><Command size={12}/> Click timeline to move playhead</span><span>Snapping <i className="toggle-on"/></span><button onClick={saveDraft}><Cloud size={13}/>Save draft</button></div>
           </section>
       </section>
-      <aside className="inspector"><div className="inspector-head"><span className="eyebrow">PROPERTIES</span><button className="icon-button subtle"><MoreHorizontal size={17}/></button></div><div className="inspector-content"><div className="selection-card"><div className="selection-icon"><Frame size={17}/></div><div><strong>Canvas settings</strong><span>Portrait composition</span></div><ChevronDown size={14}/></div><section className="inspector-section"><div className="section-title"><span>FORMAT</span><button className="icon-button subtle"><MoreHorizontal size={15}/></button></div><div className="format-preview"><div className="format-portrait"><span/></div><div className="format-copy"><strong>Portrait 9:16</strong><span>Social video</span><button>Change format <ChevronDown size={12}/></button></div></div><div className="dimension-row"><label>Width<div><input value={project.canvas.width} readOnly/><span>px</span></div></label><span className="dimension-link">↔</span><label>Height<div><input value={project.canvas.height} readOnly/><span>px</span></div></label></div><label className="inspector-select-label">Frame rate<button>{project.canvas.fps} fps <ChevronDown size={13}/></button></label></section><section className="inspector-section"><div className="section-title"><span>CANVAS</span></div><div className="inspector-property"><span>Background</span><button className="color-picker"><i style={{ background: project.canvas.background }}/><span>{project.canvas.background}</span><ChevronDown size={12}/></button></div><div className="inspector-property"><span>Safe margins</span><button className="switch on"><i/></button></div><div className="inspector-property"><span>Background fill</span><button className="switch"><i/></button></div></section><section className="inspector-section layer-summary"><div className="section-title"><span>LAYERS</span><button className="icon-button subtle"><Plus size={15}/></button></div>{project.tracks.map((track) => <div className="layer-row" key={track.id}><span className="track-color" style={{ background: track.color }}/><span>{track.name}</span><button title="Lock layer"><LockKeyhole size={12}/></button></div>)}</section><div className="inspector-tip"><Sparkles size={14}/><span>Select a layer or clip to see its editing controls here.</span></div></div><div className="inspector-bottom"><button><CircleHelp size={14}/>Inspector guide</button><span>⌘ /</span></div></aside>
+      <aside className="inspector">
+        <div className="inspector-head"><span className="eyebrow">PROPERTIES</span><button className="icon-button subtle" aria-label="Inspector options"><MoreHorizontal size={17}/></button></div>
+        <div className="inspector-content">
+          <div className="selection-card"><div className="selection-icon"><Frame size={17}/></div><div><strong>Canvas settings</strong><span>{project.canvas.width} × {project.canvas.height}</span></div><ChevronDown size={14}/></div>
+          <section className="inspector-section">
+            <div className="section-title"><span>FORMAT</span></div>
+            <div className="format-preview">
+              <div className="format-portrait" style={{ aspectRatio: `${project.canvas.width} / ${project.canvas.height}` }}><span/></div>
+              <div className="format-copy"><strong>{CANVAS_PRESETS.find((preset) => preset.id === canvasPresetId(project.canvas.width, project.canvas.height))?.label ?? 'Custom canvas'}</strong><span>Canvas dimensions</span></div>
+            </div>
+            <label className="canvas-property-label">Preset
+              <select aria-label="Inspector canvas preset" value={canvasPresetId(project.canvas.width, project.canvas.height)} onChange={(event) => updateCanvasPreset(event.target.value)}>
+                {CANVAS_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
+                <option value="custom" disabled>Custom {project.canvas.width} × {project.canvas.height}</option>
+              </select>
+            </label>
+            <div className="dimension-row">
+              <label>Width<div><input aria-label="Canvas width" type="number" min="1" max={MAX_CANVAS_DIMENSION} step="1" value={project.canvas.width} onChange={(event) => updateCanvasDimension('width', event.currentTarget.valueAsNumber)}/><span>px</span></div></label>
+              <span className="dimension-link">×</span>
+              <label>Height<div><input aria-label="Canvas height" type="number" min="1" max={MAX_CANVAS_DIMENSION} step="1" value={project.canvas.height} onChange={(event) => updateCanvasDimension('height', event.currentTarget.valueAsNumber)}/><span>px</span></div></label>
+            </div>
+            <label className="canvas-property-label">Frame rate
+              <select aria-label="Frame rate" value={FRAME_RATE_PRESETS.includes(project.canvas.fps as typeof FRAME_RATE_PRESETS[number]) ? String(project.canvas.fps) : 'custom'} onChange={(event) => updateFrameRate(Number(event.target.value))}>
+                {FRAME_RATE_PRESETS.map((fps) => <option key={fps} value={fps}>{fps} fps</option>)}
+                {!FRAME_RATE_PRESETS.includes(project.canvas.fps as typeof FRAME_RATE_PRESETS[number]) && <option value="custom" disabled>{project.canvas.fps} fps custom</option>}
+              </select>
+            </label>
+          </section>
+          <section className="inspector-section"><div className="section-title"><span>CANVAS</span></div><div className="inspector-property"><span>Background</span><button className="color-picker"><i style={{ background: project.canvas.background }}/><span>{project.canvas.background}</span><ChevronDown size={12}/></button></div><div className="inspector-property"><span>Safe margins</span><button className="switch on"><i/></button></div><div className="inspector-property"><span>Background fill</span><button className="switch"><i/></button></div></section>
+          <section className="inspector-section layer-summary"><div className="section-title"><span>LAYERS</span><button className="icon-button subtle"><Plus size={15}/></button></div>{project.tracks.map((track) => <div className="layer-row" key={track.id}><span className="track-color" style={{ background: track.color }}/><span>{track.name}</span><button title="Lock layer"><LockKeyhole size={12}/></button></div>)}</section>
+          <div className="inspector-tip"><Sparkles size={14}/><span>Select a layer or clip to see its editing controls here.</span></div>
+        </div>
+        <div className="inspector-bottom"><button><CircleHelp size={14}/>Inspector guide</button><span>⌘ /</span></div>
+      </aside>
     </section>
     <footer className="statusbar"><div><span className="status-online"/>Workspace ready</div><span>Frameforge Studio <i>·</i> Draft 1.0</span><button onClick={() => setNotice('Keyboard shortcuts: Space play/pause · ⌘Z undo · ⌘⇧Z redo · ⌘S save')}><CircleHelp size={13}/>Shortcuts</button></footer>
     {exportOpen && <div className="export-backdrop" role="presentation" onMouseDown={(event) => { if (!exporting && event.target === event.currentTarget) setExportOpen(false); }}>

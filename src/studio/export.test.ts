@@ -1,8 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { clipDurationAtSpeed, clipOpacityAt, clipSourceTimeAt, clipTransformAt, makeProject, parseProjectDocument } from './model';
+import { clipDurationAtSpeed, clipOpacityAt, clipSourceTimeAt, clipTransformAt, makeProject, MAX_CANVAS_PIXELS, parseProjectDocument } from './model';
 import { applyClipTransform, audioGainAt, audioGainFor, createExportPlan } from './export';
 
 describe('video export plan', () => {
+  it('accepts supported canvas formats and rejects unsafe dimensions and frame rates', () => {
+    const project = makeProject();
+    project.canvas = { ...project.canvas, width: 1920, height: 1080, fps: 60 };
+    expect(parseProjectDocument(project).canvas).toMatchObject({ width: 1920, height: 1080, fps: 60 });
+    project.canvas.width = Math.ceil(Math.sqrt(MAX_CANVAS_PIXELS)) + 1;
+    project.canvas.height = project.canvas.width;
+    expect(() => parseProjectDocument(project)).toThrow('This project document is not a supported Frameforge version.');
+    project.canvas.width = 1080;
+    project.canvas.height = 1920;
+    project.canvas.fps = 121;
+    expect(() => parseProjectDocument(project)).toThrow('This project document is not a supported Frameforge version.');
+  });
+
   it('maps timeline time to media time at clip speed and preserves source range when speed changes', () => {
     const clip = { id: 'clip', assetId: 'video', trackId: 'video-1', start: 5, duration: 4, sourceOffset: 2, speed: 1.5 };
     expect(clipSourceTimeAt(clip, 4)).toBe(2);

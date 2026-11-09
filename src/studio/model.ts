@@ -13,6 +13,17 @@ const isRecord = (value: unknown): value is Record<string, unknown> => !!value &
 const colorAdjustmentFields: (keyof ColorAdjustment)[] = ['exposure', 'contrast', 'saturation', 'temperature', 'tint'];
 export const MIN_CLIP_SPEED = 0.25;
 export const MAX_CLIP_SPEED = 4;
+export const CANVAS_PRESETS = [
+  { id: 'portrait', label: 'Portrait 9:16', width: 1080, height: 1920 },
+  { id: 'landscape', label: 'Landscape 16:9', width: 1920, height: 1080 },
+  { id: 'square', label: 'Square 1:1', width: 1080, height: 1080 },
+  { id: 'portrait-4-5', label: 'Portrait 4:5', width: 1080, height: 1350 },
+  { id: 'classic-4-3', label: 'Classic 4:3', width: 1440, height: 1080 },
+  { id: 'photo-3-2', label: 'Photo 3:2', width: 1620, height: 1080 },
+] as const;
+export const FRAME_RATE_PRESETS = [24, 25, 30, 50, 60] as const;
+export const MAX_CANVAS_DIMENSION = 8192;
+export const MAX_CANVAS_PIXELS = 33_177_600;
 
 export function clipSourceTimeAt(clip: TimelineClip, timelineTime: number): number {
   return clip.sourceOffset + Math.max(0, timelineTime - clip.start) * (clip.speed ?? 1);
@@ -45,9 +56,10 @@ export function parseProjectDocument(value: unknown): ProjectDocument {
     typeof document.project.id !== 'string' ||
     typeof document.project.name !== 'string' ||
     !document.canvas ||
-    !Number.isFinite(document.canvas.width) ||
-    !Number.isFinite(document.canvas.height) ||
-    !Number.isFinite(document.canvas.fps) ||
+    !Number.isInteger(document.canvas.width) || document.canvas.width < 1 || document.canvas.width > MAX_CANVAS_DIMENSION ||
+    !Number.isInteger(document.canvas.height) || document.canvas.height < 1 || document.canvas.height > MAX_CANVAS_DIMENSION ||
+    document.canvas.width * document.canvas.height > MAX_CANVAS_PIXELS ||
+    !Number.isFinite(document.canvas.fps) || document.canvas.fps < 1 || document.canvas.fps > 120 ||
     typeof document.canvas.background !== 'string' ||
     !Array.isArray(document.tracks) ||
     !document.tracks.every((track) => isRecord(track) && typeof track.id === 'string' && typeof track.name === 'string' && ['video', 'audio', 'text'].includes(String(track.kind)) && typeof track.color === 'string' && typeof track.muted === 'boolean' && typeof track.hidden === 'boolean' && typeof track.locked === 'boolean') ||

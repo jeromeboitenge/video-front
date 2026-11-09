@@ -5,6 +5,20 @@
 .timeline-media-unavailable,.timeline-composition-empty{position:absolute;inset:0;display:grid;place-items:center;padding:24px;color:#c0bec7;background:#202125;text-align:center}
 .timeline-composition-empty{color:#8e8d95}
 .timeline-composition audio{display:none}
+.clip-wave{min-width:0;justify-content:space-between;overflow:hidden}
+.clip-wave i{flex:0 0 2px;max-height:15px;min-height:2px}
+.clip-wave-status{align-self:center;color:#8e8d95;font-size:7px;white-space:nowrap}
+.clip-wave-error .clip-wave-status{color:#e2a8a0}
+.track-type-actions{display:flex;justify-content:flex-end;gap:6px;padding:5px 12px;border-bottom:1px solid #292a30;background:#18191c}
+.track-type-actions button{height:23px;padding:0 7px;display:inline-flex;align-items:center;gap:5px;border:1px solid #34353c;border-radius:4px;color:#a6a4ad;font-size:9px}
+.track-type-actions button:hover{border-color:#5a4a79;background:#25222c;color:#ded6f1}
+.track-management-panel{max-height:112px;overflow:auto;padding:6px 12px;border-bottom:1px solid #292a30;background:#1a1b1f}
+.track-management-row{display:flex;align-items:center;gap:5px;min-height:28px}
+.track-management-row input{min-width:0;flex:1;height:22px;padding:0 6px;border:1px solid #34353c;border-radius:4px;background:#141518;color:#e3e1e8;font-size:9px}
+.track-management-row button{width:22px;height:22px;display:grid;place-items:center;border:1px solid #34353c;border-radius:4px;color:#a6a4ad}
+.track-management-row button:hover:not(:disabled){background:#292a30;color:#eee}
+.track-management-row button:disabled{opacity:.35;cursor:default}
+.track-management-row .track-delete:hover:not(:disabled){border-color:#794d51;background:#302124;color:#f0b5b0}
 
 @media(max-height:800px){
   .workspace{min-height:0}

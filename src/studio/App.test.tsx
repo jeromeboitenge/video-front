@@ -4,6 +4,7 @@ import App from './App';
 import { readMedia, storeMedia } from './mediaStore';
 import { makeProject, parseProjectDocument } from './model';
 import { renderProjectVideo } from './export';
+import { decodeAudioWaveform } from './waveform';
 
 vi.mock('./mediaStore', () => ({
   storeMedia: vi.fn().mockResolvedValue(undefined),
@@ -12,6 +13,10 @@ vi.mock('./mediaStore', () => ({
 vi.mock('./export', async (importOriginal) => ({
   ...await importOriginal<typeof import('./export')>(),
   renderProjectVideo: vi.fn(),
+}));
+vi.mock('./waveform', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./waveform')>(),
+  decodeAudioWaveform: vi.fn().mockResolvedValue({ duration: 4, peaks: [0.1, 0.5, 0.8, 0.2] }),
 }));
 
 describe('editor media and timeline flow', () => {
@@ -119,6 +124,27 @@ describe('editor media and timeline flow', () => {
       const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
       expect(saved.clips[0]).toMatchObject({ speed: 2, duration: 2, sourceOffset: 0 });
     });
+  });
+
+  it('updates canvas aspect ratio and frame rate across toolbar and inspector controls', async () => {
+    render(<App />);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Canvas aspect ratio' }), { target: { value: 'landscape' } });
+    expect(screen.getByRole('combobox', { name: 'Inspector canvas preset' })).toHaveProperty('value', 'landscape');
+    expect(screen.getByText('Landscape 16:9')).toBeTruthy();
+    expect(document.querySelector<HTMLElement>('.canvas-frame')?.style.aspectRatio).toBe('1920 / 1080');
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Frame rate' }), { target: { value: '60' } });
+    expect(screen.getByText('60 fps')).toBeTruthy();
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Canvas width' }), { target: { value: '1280' } });
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Canvas height' }), { target: { value: '720' } });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.canvas).toMatchObject({ width: 1280, height: 720, fps: 60 });
+    });
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Canvas width' }), { target: { value: '9000' } });
+    expect((screen.getByRole('spinbutton', { name: 'Canvas width' }) as HTMLInputElement).value).toBe('1280');
   });
 
   it('starts a rendered video export and reports completion', async () => {
@@ -259,6 +285,73 @@ describe('editor media and timeline flow', () => {
     });
   });
 
+  it('creates typed video and audio tracks with unique names and supports undo', async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add audio track' }));
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.tracks).toContainEqual(expect.objectContaining({ name: 'Audio 2', kind: 'audio', color: '#eaa65c' }));
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add video track' }));
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.tracks).toContainEqual(expect.objectContaining({ name: 'Video 2', kind: 'video', color: '#ad7dff' }));
+    });
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.tracks.some((track: { name: string }) => track.name === 'Video 2')).toBe(false);
+      expect(saved.tracks.some((track: { name: string }) => track.name === 'Audio 2')).toBe(true);
+    });
+  });
+
+  it('renames, reorders, and deletes tracks with their clips through undoable changes', async () => {
+    const project = makeProject();
+    project.assets = [{ id: 'asset-1', name: 'scene.mp4', kind: 'video', mimeType: 'video/mp4', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 2, sourceOffset: 0 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Manage tracks' }));
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Track name Video 1' }), { target: { value: 'Main video' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save track name Video 1' }));
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.tracks[0].name).toBe('Main video');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move Main video down' }));
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.tracks[0].id).toBe('text-1');
+      expect(saved.tracks[1].name).toBe('Main video');
+    });
+
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Main video' }));
+    expect(confirm).toHaveBeenCalledWith('Delete "Main video" and its 1 clip? You can undo this action.');
+    expect(JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}').clips).toHaveLength(1);
+
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Main video' }));
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.tracks.some((track: { name: string }) => track.name === 'Main video')).toBe(false);
+      expect(saved.clips).toHaveLength(0);
+    });
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.tracks[1].name).toBe('Main video');
+      expect(saved.clips).toHaveLength(1);
+    });
+  });
+
   it('adjusts audio clip volume for preview and export and supports undo', async () => {
     render(<App />);
     const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
@@ -283,6 +376,24 @@ describe('editor media and timeline flow', () => {
       const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
       expect(saved.clips?.[0].volume).toBeUndefined();
     });
+  });
+
+  it('renders decoded audio peaks in the matching timeline clip', async () => {
+    const audioBlob = new Blob(['audio'], { type: 'audio/mpeg' });
+    vi.mocked(readMedia).mockResolvedValue(audioBlob);
+    vi.mocked(decodeAudioWaveform).mockResolvedValue({ duration: 4, peaks: [0.1, 0.5, 0.8, 0.2] });
+    const project = makeProject();
+    project.assets = [{ id: 'audio-asset', name: 'music.mp3', kind: 'audio', mimeType: 'audio/mpeg', size: 5 }];
+    project.clips = [{ id: 'audio-clip', assetId: 'audio-asset', trackId: 'audio-1', start: 0, duration: 2, sourceOffset: 1 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+
+    await waitFor(() => expect(decodeAudioWaveform).toHaveBeenCalledWith(audioBlob));
+    const waveform = await screen.findByRole('img', { name: 'Waveform for music.mp3' });
+    await screen.findAllByTestId('waveform-bar');
+    expect(waveform.querySelectorAll('[data-testid="waveform-bar"]')).toHaveLength(36);
+    expect(waveform.querySelector('[data-testid="waveform-bar"]')?.getAttribute('style')).toBe('height: 7.5px;');
   });
 
   it('persists and previews clip position, scale, rotation, and opacity with undo', async () => {

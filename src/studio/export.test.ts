@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { clipOpacityAt, makeProject } from './model';
-import { audioGainAt, audioGainFor, createExportPlan } from './export';
+import { applyClipTransform, audioGainAt, audioGainFor, createExportPlan } from './export';
 
 describe('video export plan', () => {
   it('orders visible visual clips by track and includes audio tracks in duration', () => {
@@ -37,6 +37,22 @@ describe('video export plan', () => {
     expect(audioGainAt(clip, track, 1)).toBe(0.35);
     expect(audioGainAt(clip, track, 1.5)).toBeCloseTo(0.175);
     expect(audioGainAt(clip, track, 2)).toBe(0);
+  });
+
+  it('applies clip transforms around the canvas center for export', () => {
+    const calls: number[][] = [];
+    const context: Pick<CanvasRenderingContext2D, 'translate' | 'rotate' | 'scale'> = {
+      translate: (x, y) => { calls.push([x, y]); },
+      rotate: (angle) => { calls.push([angle]); },
+      scale: (x, y) => { calls.push([x, y]); },
+    };
+    applyClipTransform(context, {
+      id: 'clip', assetId: 'image', trackId: 'video-1', start: 0, duration: 1, sourceOffset: 0,
+      x: 90, y: -45, scale: 1.5, rotation: 90,
+    }, 1080, 1920);
+    expect(calls[0]).toEqual([630, 915]);
+    expect(calls[1]?.[0]).toBeCloseTo(Math.PI / 2);
+    expect(calls[2]).toEqual([1.5, 1.5]);
   });
 
   it('exports text-only sequences and extends duration to include overlays', () => {

@@ -21,6 +21,12 @@ describe('editor media and timeline flow', () => {
     expect(parseProjectDocument(olderDocument)).toMatchObject({ effects: [], textOverlays: [] });
   });
 
+  it('rejects visual transform values outside supported bounds', () => {
+    const project = makeProject();
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 1, sourceOffset: 0, scale: 8 }];
+    expect(() => parseProjectDocument(project)).toThrow('This project document is not a supported Frameforge version.');
+  });
+
   it('creates a timed title and persists it in the project', async () => {
     const project = makeProject();
     project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
@@ -211,6 +217,35 @@ describe('editor media and timeline flow', () => {
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
       expect(saved.clips?.[0].volume).toBeUndefined();
+    });
+  });
+
+  it('persists and previews clip position, scale, rotation, and opacity with undo', async () => {
+    vi.mocked(readMedia).mockResolvedValue(new Blob(['image'], { type: 'image/png' }));
+    const project = makeProject();
+    project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 2, sourceOffset: 0 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+    fireEvent.click(document.querySelector('.clip')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Effects' }));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Position X' }), { target: { value: '90' } });
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Scale' }), { target: { value: '150' } });
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Rotation' }), { target: { value: '30' } });
+    fireEvent.change(screen.getByRole('slider', { name: 'Clip opacity' }), { target: { value: '0.5' } });
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0]).toMatchObject({ x: 90, scale: 1.5, rotation: 30, opacity: 0.5 });
+    });
+    await waitFor(() => expect(document.querySelector<HTMLImageElement>('.timeline-composition-layer img')?.style.transform).toBe('translate(90px, 0px) rotate(30deg) scale(1.5)'));
+    expect(document.querySelector<HTMLElement>('.timeline-composition-layer')?.style.opacity).toBe('0.5');
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].opacity).toBeUndefined();
     });
   });
 

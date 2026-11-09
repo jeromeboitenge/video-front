@@ -25,6 +25,17 @@ export function audioGainAt(clip: TimelineClip, track: Track, time: number): num
   return audioGainFor(clip, track) * clipOpacityAt(clip, time);
 }
 
+export function applyClipTransform(
+  context: Pick<CanvasRenderingContext2D, 'translate' | 'rotate' | 'scale'>,
+  clip: TimelineClip,
+  width: number,
+  height: number,
+): void {
+  context.translate(width / 2 + (clip.x ?? 0), height / 2 + (clip.y ?? 0));
+  context.rotate((clip.rotation ?? 0) * Math.PI / 180);
+  context.scale(clip.scale ?? 1, clip.scale ?? 1);
+}
+
 export function createExportPlan(project: ProjectDocument): ExportPlan {
   const tracks = new Map(project.tracks.map((track, index) => [track.id, { track, index }]));
   const assets = new Map(project.assets.map((asset) => [asset.id, asset]));
@@ -107,9 +118,7 @@ function drawCover(context: CanvasRenderingContext2D, source: CanvasImageSource,
   const scale = Math.max(width / sourceWidth, height / sourceHeight);
   const drawWidth = sourceWidth * scale;
   const drawHeight = sourceHeight * scale;
-  context.translate(width / 2 + (clip.x ?? 0), height / 2 + (clip.y ?? 0));
-  context.rotate((clip.rotation ?? 0) * Math.PI / 180);
-  context.scale(clip.scale ?? 1, clip.scale ?? 1);
+  applyClipTransform(context, clip, width, height);
   context.drawImage(source, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
 }
 

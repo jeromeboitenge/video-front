@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { AudioLines, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
-import { clipOpacityAt, clipTransformStyle, clipVisualOpacityAt, formatTime, makeProject, parseProjectDocument, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId } from './model';
+import { clipTransformStyle, clipVisualOpacityAt, formatTime, makeProject, parseProjectDocument, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId } from './model';
 import { effectRegistry, effectStyle, type AppliedEffect, type EffectId } from './effects';
 import { audioGainAt, renderProjectVideo } from './export';
 import { authenticate, getCloudMediaContent, getCloudProject, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';

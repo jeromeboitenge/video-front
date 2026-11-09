@@ -1,6 +1,6 @@
 import { getCloudMediaContent } from './api';
 import { effectStyle } from './effects';
-import { clipOpacityAt, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
+import { clipOpacityAt, clipVisualOpacityAt, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
 import { readMedia } from './mediaStore';
 
 type ExportClip = {
@@ -16,6 +16,14 @@ export type ExportPlan = {
   video: ExportClip[];
   audio: ExportClip[];
 };
+
+export function audioGainFor(clip: TimelineClip, track: Track): number {
+  return track.muted ? 0 : clip.volume ?? 1;
+}
+
+export function audioGainAt(clip: TimelineClip, track: Track, time: number): number {
+  return audioGainFor(clip, track) * clipOpacityAt(clip, time);
+}
 
 export function createExportPlan(project: ProjectDocument): ExportPlan {
   const tracks = new Map(project.tracks.map((track, index) => [track.id, { track, index }]));
@@ -95,11 +103,14 @@ function waitForSeek(media: HTMLMediaElement, seconds: number): Promise<void> {
   });
 }
 
-function drawCover(context: CanvasRenderingContext2D, source: CanvasImageSource, sourceWidth: number, sourceHeight: number, width: number, height: number) {
+function drawCover(context: CanvasRenderingContext2D, source: CanvasImageSource, sourceWidth: number, sourceHeight: number, width: number, height: number, clip: TimelineClip) {
   const scale = Math.max(width / sourceWidth, height / sourceHeight);
   const drawWidth = sourceWidth * scale;
   const drawHeight = sourceHeight * scale;
-  context.drawImage(source, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+  context.translate(width / 2 + (clip.x ?? 0), height / 2 + (clip.y ?? 0));
+  context.rotate((clip.rotation ?? 0) * Math.PI / 180);
+  context.scale(clip.scale ?? 1, clip.scale ?? 1);
+  context.drawImage(source, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
 }
 
 export async function renderProjectVideo(
@@ -124,6 +135,7 @@ export async function renderProjectVideo(
   const mediaElements: HTMLMediaElement[] = [];
   const mediaEntries: { media: HTMLMediaElement; asset: MediaAsset }[] = [];
   const playback = new Map<ExportClip, HTMLMediaElement>();
+  const gainNodes = new Map<ExportClip, GainNode>();
   const imageSources = new Map<string, HTMLImageElement>();
   let audioContext: AudioContext | undefined;
   let audioDestination: MediaStreamAudioDestinationNode | undefined;
@@ -178,7 +190,8 @@ export async function renderProjectVideo(
         }
         const source = audioContext.createMediaElementSource(media);
         const gain = audioContext.createGain();
-        gain.gain.value = item.track.muted ? 0 : 1;
+        gain.gain.value = 0;
+        gainNodes.set(item, gain);
         source.connect(gain).connect(audioDestination);
       }
     }
@@ -218,15 +231,15 @@ export async function renderProjectVideo(
         if (time < item.clip.start || time >= item.clip.start + item.clip.duration) continue;
         const effect = effectStyle(project.effects, item.asset.id);
         context.save();
-        context.globalAlpha = clipOpacityAt(item.clip, time);
+        context.globalAlpha = clipVisualOpacityAt(item.clip, time);
         context.filter = effect.filter ?? 'none';
         if (item.asset.kind === 'image') {
           const image = imageSources.get(item.asset.id);
-          if (image?.naturalWidth && image.naturalHeight) drawCover(context, image, image.naturalWidth, image.naturalHeight, canvas.width, canvas.height);
+          if (image?.naturalWidth && image.naturalHeight) drawCover(context, image, image.naturalWidth, image.naturalHeight, canvas.width, canvas.height, item.clip);
         } else {
           const video = playback.get(item) as HTMLVideoElement | undefined;
           if (video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth && video.videoHeight) {
-            drawCover(context, video, video.videoWidth, video.videoHeight, canvas.width, canvas.height);
+            drawCover(context, video, video.videoWidth, video.videoHeight, canvas.width, canvas.height, item.clip);
           }
         }
         context.restore();
@@ -290,10 +303,15 @@ export async function renderProjectVideo(
       const frameStart = performance.now();
       const time = Math.min(plan.duration, (frameStart - startTime) / 1000);
       const nextActive = new Set<HTMLMediaElement>();
-      for (const item of [...plan.video.filter((entry) => entry.asset.kind === 'video'), ...plan.audio]) {
-        if (time < item.clip.start || time >= item.clip.start + item.clip.duration) continue;
+      for (const item of audioItems) {
         const media = playback.get(item);
         if (!media) continue;
+        const activeAtTime = time >= item.clip.start && time < item.clip.start + item.clip.duration;
+        const gain = gainNodes.get(item);
+        if (gain && audioContext) {
+          gain.gain.setTargetAtTime(activeAtTime ? audioGainAt(item.clip, item.track, time) : 0, audioContext.currentTime, 0.015);
+        }
+        if (!activeAtTime) continue;
         nextActive.add(media);
         if (!active.has(media)) {
           await waitForSeek(media, item.clip.sourceOffset + Math.max(0, time - item.clip.start));

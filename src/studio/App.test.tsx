@@ -9,7 +9,10 @@ vi.mock('./mediaStore', () => ({
   storeMedia: vi.fn().mockResolvedValue(undefined),
   readMedia: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock('./export', () => ({ renderProjectVideo: vi.fn() }));
+vi.mock('./export', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./export')>(),
+  renderProjectVideo: vi.fn(),
+}));
 
 describe('editor media and timeline flow', () => {
   it('loads project documents created before effects were introduced', () => {
@@ -111,6 +114,132 @@ describe('editor media and timeline flow', () => {
     expect(await screen.findByText('No visual clip at this time')).toBeTruthy();
   });
 
+  it('moves and trims timeline clips with frame precision and supports undo', async () => {
+    const project = makeProject();
+    project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 2, duration: 4, sourceOffset: 1 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+    const timeline = document.querySelector<HTMLElement>('.timeline-content')!;
+    vi.spyOn(timeline, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 200, width: 600, height: 200, toJSON: () => ({}) });
+
+    fireEvent.pointerDown(screen.getByRole('slider', { name: 'Trim start of portrait.png' }), { pointerId: 1, button: 0, clientX: 100 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 125 });
+    fireEvent.pointerUp(window, { pointerId: 1 });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0]).toMatchObject({ start: 3, duration: 3, sourceOffset: 2 });
+    });
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0]).toMatchObject({ start: 2, duration: 4, sourceOffset: 1 });
+    });
+
+    fireEvent.pointerDown(document.querySelector('.clip')!, { pointerId: 2, button: 0, clientX: 100 });
+    fireEvent.pointerMove(window, { pointerId: 2, clientX: 125 });
+    fireEvent.pointerUp(window, { pointerId: 2 });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0]).toMatchObject({ start: 3, duration: 4, sourceOffset: 1 });
+    });
+  });
+
+  it('moves clips between compatible tracks and rejects incompatible or locked targets', async () => {
+    const project = makeProject();
+    project.assets = [{ id: 'video-asset', name: 'scene.mp4', kind: 'video', mimeType: 'video/mp4', size: 12 }];
+    project.clips = [{ id: 'video-clip', assetId: 'video-asset', trackId: 'video-1', start: 0, duration: 4, sourceOffset: 0 }];
+    project.tracks.push({ id: 'video-locked', name: 'Video locked', kind: 'video', color: '#ad7dff', muted: false, hidden: false, locked: true });
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+    const timeline = document.querySelector<HTMLElement>('.timeline-content')!;
+    timeline.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 200, width: 600, height: 200, toJSON: () => ({}) });
+    const lanes = [...document.querySelectorAll<HTMLElement>('.track-lane')];
+    lanes[0].getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 40, width: 600, height: 40, toJSON: () => ({}) });
+    lanes[1].getBoundingClientRect = () => ({ x: 0, y: 40, left: 0, top: 40, right: 600, bottom: 80, width: 600, height: 40, toJSON: () => ({}) });
+    lanes[2].getBoundingClientRect = () => ({ x: 0, y: 80, left: 0, top: 80, right: 600, bottom: 120, width: 600, height: 40, toJSON: () => ({}) });
+    lanes[3].getBoundingClientRect = () => ({ x: 0, y: 120, left: 0, top: 120, right: 600, bottom: 160, width: 600, height: 40, toJSON: () => ({}) });
+
+    fireEvent.pointerDown(document.querySelector('.clip')!, { pointerId: 1, button: 0, clientX: 100, clientY: 20 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(window, { pointerId: 1 });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].trackId).toBe('audio-1');
+    });
+
+    fireEvent.pointerDown(document.querySelector('.clip')!, { pointerId: 2, button: 0, clientX: 100, clientY: 60 });
+    fireEvent.pointerMove(window, { pointerId: 2, clientX: 100, clientY: 60 });
+    fireEvent.pointerUp(window, { pointerId: 2 });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].trackId).toBe('audio-1');
+    });
+
+    fireEvent.pointerDown(document.querySelector('.clip')!, { pointerId: 3, button: 0, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(window, { pointerId: 3, clientX: 100, clientY: 140 });
+    fireEvent.pointerUp(window, { pointerId: 3 });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].trackId).toBe('audio-1');
+    });
+  });
+
+  it('adjusts audio clip volume for preview and export and supports undo', async () => {
+    render(<App />);
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    fireEvent.change(fileInput, { target: { files: [new File(['audio'], 'music.mp3', { type: 'audio/mpeg' })] } });
+    await waitFor(() => expect(document.querySelector('.clip')).not.toBeNull());
+
+    fireEvent.click(document.querySelector('.clip')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Audio' }));
+    const volume = await screen.findByRole('slider', { name: 'Clip volume' });
+    fireEvent.change(volume, { target: { value: '0.4' } });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].volume).toBe(0.4);
+    });
+
+    const audio = document.querySelector<HTMLAudioElement>('.timeline-composition audio')!;
+    fireEvent.loadedMetadata(audio);
+    expect(audio.volume).toBe(0.4);
+
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].volume).toBeUndefined();
+    });
+  });
+
+  it('applies audio clip fades in the preview and saves them with undo support', async () => {
+    render(<App />);
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    fireEvent.change(fileInput, { target: { files: [new File(['audio'], 'fade.mp3', { type: 'audio/mpeg' })] } });
+    await waitFor(() => expect(document.querySelector('.clip')).not.toBeNull());
+
+    fireEvent.click(document.querySelector('.clip')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Transitions' }));
+    fireEvent.change(screen.getByRole('slider', { name: 'Fade in duration' }), { target: { value: '1' } });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].transitionIn).toBe(1);
+    });
+
+    const audio = document.querySelector<HTMLAudioElement>('.timeline-composition audio')!;
+    fireEvent.loadedMetadata(audio);
+    expect(audio.volume).toBe(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Play / pause · Space' }));
+    await waitFor(() => expect(audio.volume).toBeGreaterThan(0));
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].transitionIn).toBeUndefined();
+    });
+  });
+
   it('advances the sequence playhead when playback starts', async () => {
     const project = makeProject();
     project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
@@ -128,6 +257,7 @@ describe('editor media and timeline flow', () => {
     vi.mocked(storeMedia).mockResolvedValue(undefined);
     vi.mocked(readMedia).mockResolvedValue(undefined);
     vi.mocked(renderProjectVideo).mockResolvedValue(new Blob(['rendered'], { type: 'video/webm' }));
+    Object.defineProperty(window, 'PointerEvent', { configurable: true, value: MouseEvent });
     localStorage.clear();
     sessionStorage.clear();
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:frameforge-test') });

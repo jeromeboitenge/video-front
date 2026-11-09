@@ -87,8 +87,8 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
   if (tool === 'transitions') {
     const maxDuration = selectedClip ? Math.max(0, Math.min(2, selectedClip.duration / 2)) : 0;
     return <div className="creative-panel">
-      <div className="creative-intro"><span className="eyebrow">CLIP TRANSITIONS</span><p>Fade selected visual clips in and out. Fades are included in preview and WebM export.</p></div>
-      {!selectedClip ? <div className="creative-empty">Select a video or image clip in the timeline to adjust its fades.</div> : <>
+      <div className="creative-intro"><span className="eyebrow">CLIP TRANSITIONS</span><p>Fade selected visual or audio clips in and out. Fades are included in preview and WebM export.</p></div>
+      {!selectedClip ? <div className="creative-empty">Select a video, image, or audio clip in the timeline to adjust its fades.</div> : <>
         <div className="transition-card">
           <strong>Fade in</strong>
           <label htmlFor="transition-in">Duration <output>{(selectedClip.transitionIn ?? 0).toFixed(1)} s</output></label>

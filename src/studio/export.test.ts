@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { clipOpacityAt, makeProject } from './model';
-import { createExportPlan } from './export';
+import { audioGainAt, audioGainFor, createExportPlan } from './export';
 
 describe('video export plan', () => {
   it('orders visible visual clips by track and includes audio tracks in duration', () => {
@@ -23,6 +23,20 @@ describe('video export plan', () => {
 
   it('fails with a clear message when the timeline is empty', () => {
     expect(() => createExportPlan(makeProject())).toThrow('Add a timeline clip, title, or caption before exporting.');
+  });
+
+  it('uses clip volume for export while honoring track mute', () => {
+    const project = makeProject();
+    const clip = { id: 'audio', assetId: 'sound', trackId: 'audio-1', start: 0, duration: 2, sourceOffset: 0, volume: 0.35, transitionIn: 1, transitionOut: 1 };
+    const track = project.tracks.find(({ id }) => id === 'audio-1')!;
+    expect(audioGainFor(clip, track)).toBe(0.35);
+    expect(audioGainFor(clip, { ...track, muted: true })).toBe(0);
+    expect(audioGainFor({ ...clip, volume: undefined }, track)).toBe(1);
+    expect(audioGainAt(clip, track, 0)).toBe(0);
+    expect(audioGainAt(clip, track, 0.5)).toBeCloseTo(0.175);
+    expect(audioGainAt(clip, track, 1)).toBe(0.35);
+    expect(audioGainAt(clip, track, 1.5)).toBeCloseTo(0.175);
+    expect(audioGainAt(clip, track, 2)).toBe(0);
   });
 
   it('exports text-only sequences and extends duration to include overlays', () => {

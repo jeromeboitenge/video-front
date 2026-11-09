@@ -3,7 +3,7 @@ import type { AppliedEffect } from './effects';
 export type ToolId = 'media' | 'audio' | 'text' | 'captions' | 'elements' | 'effects' | 'transitions' | 'ai';
 export type Track = { id: string; name: string; kind: 'video' | 'audio' | 'text'; color: string; muted: boolean; hidden: boolean; locked: boolean };
 export type MediaAsset = { id: string; name: string; kind: 'video' | 'image' | 'audio'; mimeType: string; size: number; cloudId?: string };
-export type TimelineClip = { id: string; assetId: string; trackId: string; start: number; duration: number; sourceOffset: number; transitionIn?: number; transitionOut?: number };
+export type TimelineClip = { id: string; assetId: string; trackId: string; start: number; duration: number; sourceOffset: number; volume?: number; x?: number; y?: number; scale?: number; rotation?: number; opacity?: number; transitionIn?: number; transitionOut?: number };
 export type TextOverlay = { id: string; kind: 'title' | 'caption'; text: string; start: number; duration: number; position: 'top' | 'center' | 'bottom'; fontSize: number; color: string };
 export type ProjectDocument = { version: 1; project: { id: string; name: string }; canvas: { width: number; height: number; fps: number; background: string }; tracks: Track[]; clips: TimelineClip[]; assets: MediaAsset[]; effects: AppliedEffect[]; textOverlays: TextOverlay[]; settings: Record<string, unknown> };
 
@@ -26,7 +26,7 @@ export function parseProjectDocument(value: unknown): ProjectDocument {
     !Array.isArray(document.tracks) ||
     !document.tracks.every((track) => isRecord(track) && typeof track.id === 'string' && typeof track.name === 'string' && ['video', 'audio', 'text'].includes(String(track.kind)) && typeof track.color === 'string' && typeof track.muted === 'boolean' && typeof track.hidden === 'boolean' && typeof track.locked === 'boolean') ||
     !Array.isArray(document.clips) ||
-    !document.clips.every((clip) => isRecord(clip) && typeof clip.id === 'string' && typeof clip.assetId === 'string' && typeof clip.trackId === 'string' && Number.isFinite(clip.start) && Number.isFinite(clip.duration) && Number.isFinite(clip.sourceOffset) && (clip.transitionIn === undefined || (Number.isFinite(clip.transitionIn) && Number(clip.transitionIn) >= 0 && Number(clip.transitionIn) <= Number(clip.duration) / 2)) && (clip.transitionOut === undefined || (Number.isFinite(clip.transitionOut) && Number(clip.transitionOut) >= 0 && Number(clip.transitionOut) <= Number(clip.duration) / 2))) ||
+    !document.clips.every((clip) => isRecord(clip) && typeof clip.id === 'string' && typeof clip.assetId === 'string' && typeof clip.trackId === 'string' && Number.isFinite(clip.start) && Number.isFinite(clip.duration) && Number.isFinite(clip.sourceOffset) && (clip.volume === undefined || (Number.isFinite(clip.volume) && Number(clip.volume) >= 0 && Number(clip.volume) <= 1)) && (clip.x === undefined || (Number.isFinite(clip.x) && Math.abs(Number(clip.x)) <= 100000)) && (clip.y === undefined || (Number.isFinite(clip.y) && Math.abs(Number(clip.y)) <= 100000)) && (clip.scale === undefined || (Number.isFinite(clip.scale) && Number(clip.scale) >= 0.1 && Number(clip.scale) <= 5)) && (clip.rotation === undefined || (Number.isFinite(clip.rotation) && Math.abs(Number(clip.rotation)) <= 3600)) && (clip.opacity === undefined || (Number.isFinite(clip.opacity) && Number(clip.opacity) >= 0 && Number(clip.opacity) <= 1)) && (clip.transitionIn === undefined || (Number.isFinite(clip.transitionIn) && Number(clip.transitionIn) >= 0 && Number(clip.transitionIn) <= Number(clip.duration) / 2)) && (clip.transitionOut === undefined || (Number.isFinite(clip.transitionOut) && Number(clip.transitionOut) >= 0 && Number(clip.transitionOut) <= Number(clip.duration) / 2))) ||
     !Array.isArray(document.assets) ||
     !document.assets.every((asset) => isRecord(asset) && typeof asset.id === 'string' && typeof asset.name === 'string' && ['video', 'image', 'audio'].includes(String(asset.kind)) && typeof asset.mimeType === 'string' && Number.isFinite(asset.size) && (asset.cloudId === undefined || typeof asset.cloudId === 'string')) ||
     (document.effects !== undefined && (!Array.isArray(document.effects) || !document.effects.every((effect) => isRecord(effect) && typeof effect.id === 'string' && typeof effect.assetId === 'string' && assets.some((asset) => isRecord(asset) && asset.id === effect.assetId) && ['vivid', 'monochrome', 'vintage', 'soft-focus', 'warm-glow', 'cool-tone', 'vignette'].includes(String(effect.type)) && typeof effect.strength === 'number' && Number.isFinite(effect.strength) && effect.strength >= 0 && effect.strength <= 100 && typeof effect.enabled === 'boolean'))) ||
@@ -59,4 +59,12 @@ export function clipOpacityAt(clip: TimelineClip, time: number): number {
   const fadeInOpacity = fadeIn > 0 ? Math.min(1, Math.max(0, (time - clip.start) / fadeIn)) : 1;
   const fadeOutOpacity = fadeOut > 0 ? Math.min(1, Math.max(0, (clip.start + clip.duration - time) / fadeOut)) : 1;
   return Math.min(fadeInOpacity, fadeOutOpacity);
+}
+
+export function clipVisualOpacityAt(clip: TimelineClip, time: number): number {
+  return clipOpacityAt(clip, time) * (clip.opacity ?? 1);
+}
+
+export function clipTransformStyle(clip: TimelineClip): string {
+  return `translate(${clip.x ?? 0}px, ${clip.y ?? 0}px) rotate(${clip.rotation ?? 0}deg) scale(${clip.scale ?? 1})`;
 }

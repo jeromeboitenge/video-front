@@ -266,7 +266,9 @@ export async function renderProjectVideo(
         if (time < overlay.start || time >= overlay.start + overlay.duration) continue;
         const fontSize = Math.round(overlay.fontSize * canvas.width / 1080);
         context.save();
-        context.font = `600 ${fontSize}px Manrope, sans-serif`;
+        const fontFamily = overlay.fontFamily ?? 'Manrope';
+        const fontWeight = overlay.fontWeight ?? 'bold';
+        context.font = `${overlay.italic ? 'italic ' : ''}${fontWeight} ${fontSize}px ${fontFamily}, sans-serif`;
         const lines = overlay.text.split('\n');
         const maxWidth = canvas.width * 0.88;
         const wrapped: string[] = [];
@@ -297,6 +299,13 @@ export async function renderProjectVideo(
           context.shadowBlur = 0;
           context.fillStyle = 'rgba(0,0,0,.66)';
           context.fillRect((canvas.width - boxWidth) / 2, centerY - contentHeight / 2 - fontSize * 0.2, boxWidth, contentHeight + fontSize * 0.4);
+        }
+        const outlineWidth = (overlay.outlineWidth ?? 0) * canvas.width / 1080;
+        if (outlineWidth > 0) {
+          context.strokeStyle = overlay.outlineColor ?? '#111111';
+          context.lineWidth = outlineWidth * 2;
+          context.lineJoin = 'round';
+          wrapped.forEach((line, index) => context.strokeText(line, canvas.width / 2, centerY - contentHeight / 2 + lineHeight * (index + 0.5), maxWidth));
         }
         context.fillStyle = overlay.color;
         wrapped.forEach((line, index) => context.fillText(line, canvas.width / 2, centerY - contentHeight / 2 + lineHeight * (index + 0.5), maxWidth));

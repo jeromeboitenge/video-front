@@ -49,12 +49,21 @@ describe('editor media and timeline flow', () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: 'Text' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Title text' }), { target: { value: 'A new chapter' } });
+    fireEvent.change(screen.getByLabelText('Font'), { target: { value: 'Georgia' } });
+    fireEvent.change(screen.getByLabelText('Text color'), { target: { value: '#ff0000' } });
+    fireEvent.change(screen.getByLabelText('Outline width'), { target: { value: '3' } });
+    fireEvent.click(screen.getByLabelText('Italic'));
     fireEvent.click(screen.getByRole('button', { name: 'Add title' }));
 
     expect(await screen.findByText('A new chapter', { selector: '.timeline-text-overlay' })).toBeTruthy();
+    const titlePreview = screen.getByText('A new chapter', { selector: '.timeline-text-overlay' }) as HTMLElement;
+    expect(titlePreview.style.fontFamily).toBe('Georgia');
+    expect(titlePreview.style.fontStyle).toBe('italic');
+    expect(titlePreview.style.color).toBe('rgb(255, 0, 0)');
+    expect(titlePreview.style.webkitTextStroke).toBe('3px #111111');
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
-      expect(saved.textOverlays?.[0]).toMatchObject({ kind: 'title', text: 'A new chapter', start: 0, duration: 3 });
+      expect(saved.textOverlays?.[0]).toMatchObject({ kind: 'title', text: 'A new chapter', start: 0, duration: 3, fontFamily: 'Georgia', color: '#ff0000', outlineWidth: 3, italic: true });
     });
 
   });

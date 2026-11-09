@@ -7,6 +7,10 @@
 .creative-form textarea{min-height:58px}
 .creative-form input,.creative-form select{height:30px}
 .creative-form-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.creative-style-row{grid-template-columns:repeat(3,minmax(0,1fr))}
+.creative-form input[type=color],.overlay-card input[type=color]{height:30px;padding:3px}
+.creative-check{display:flex!important;flex-direction:row!important;align-items:center;gap:7px!important}
+.creative-check input{width:13px;height:13px;accent-color:#ad91f5}
 .creative-primary,.creative-secondary{height:30px;display:flex;align-items:center;justify-content:center;gap:6px;border-radius:5px;font-size:9px}
 .creative-primary{background:#a78af3;color:#1a1525;font-weight:700}
 .creative-primary:hover{background:#b79fff}

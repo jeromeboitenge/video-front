@@ -23,6 +23,12 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
   const [duration, setDuration] = useState('3');
   const [position, setPosition] = useState<TextOverlay['position']>(isCaption ? 'bottom' : 'center');
   const [fontSize, setFontSize] = useState(isCaption ? '42' : '64');
+  const [fontFamily, setFontFamily] = useState<NonNullable<TextOverlay['fontFamily']>>('Manrope');
+  const [fontWeight, setFontWeight] = useState<NonNullable<TextOverlay['fontWeight']>>('bold');
+  const [italic, setItalic] = useState(false);
+  const [color, setColor] = useState('#ffffff');
+  const [outlineColor, setOutlineColor] = useState('#111111');
+  const [outlineWidth, setOutlineWidth] = useState('0');
   const [fileError, setFileError] = useState('');
   const [formError, setFormError] = useState('');
 
@@ -32,6 +38,12 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
     setDuration('3');
     setPosition(isCaption ? 'bottom' : 'center');
     setFontSize(isCaption ? '42' : '64');
+    setFontFamily('Manrope');
+    setFontWeight('bold');
+    setItalic(false);
+    setColor('#ffffff');
+    setOutlineColor('#111111');
+    setOutlineWidth('0');
     setFileError('');
     setFormError('');
   }, [tool]);
@@ -42,10 +54,12 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
     const startTime = Number(start);
     const clipDuration = Number(duration);
     const size = Number(fontSize);
+    const strokeWidth = Number(outlineWidth);
     if (!trimmed) { setFormError('Enter text before adding this overlay.'); return; }
     if (!Number.isFinite(startTime) || startTime < 0) { setFormError('Start time must be zero or greater.'); return; }
     if (!Number.isFinite(clipDuration) || clipDuration <= 0) { setFormError('Duration must be greater than zero.'); return; }
     if (!Number.isFinite(size) || size < 14 || size > 160) { setFormError('Text size must be between 14 and 160.'); return; }
+    if (!Number.isFinite(strokeWidth) || strokeWidth < 0 || strokeWidth > 12) { setFormError('Outline width must be between 0 and 12.'); return; }
     setFormError('');
     onAddOverlays([{
       id: crypto.randomUUID(),
@@ -55,7 +69,12 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
       duration: clipDuration,
       position,
       fontSize: size,
-      color: '#ffffff',
+      color,
+      fontFamily,
+      fontWeight,
+      italic,
+      outlineColor,
+      outlineWidth: strokeWidth,
     }]);
     setText('');
   }
@@ -121,6 +140,16 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
         <label>Position<select value={position} onChange={(event) => setPosition(event.target.value as TextOverlay['position'])}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
         <label>Size<input type="number" min="14" max="160" step="1" value={fontSize} onChange={(event) => setFontSize(event.target.value)} required/></label>
       </div>
+      <div className="creative-form-row">
+        <label>Font<select value={fontFamily} onChange={(event) => setFontFamily(event.target.value as NonNullable<TextOverlay['fontFamily']>)}><option value="Manrope">Manrope</option><option value="Arial">Arial</option><option value="Georgia">Georgia</option></select></label>
+        <label>Weight<select value={fontWeight} onChange={(event) => setFontWeight(event.target.value as NonNullable<TextOverlay['fontWeight']>)}><option value="normal">Regular</option><option value="bold">Bold</option></select></label>
+      </div>
+      <div className="creative-form-row creative-style-row">
+        <label>Text color<input aria-label="Text color" type="color" value={color} onChange={(event) => setColor(event.target.value)}/></label>
+        <label>Outline color<input aria-label="Outline color" type="color" value={outlineColor} onChange={(event) => setOutlineColor(event.target.value)}/></label>
+        <label>Outline<input aria-label="Outline width" type="number" min="0" max="12" step="1" value={outlineWidth} onChange={(event) => setOutlineWidth(event.target.value)}/></label>
+      </div>
+      <label className="creative-check"><input type="checkbox" checked={italic} onChange={(event) => setItalic(event.target.checked)}/> Italic</label>
       {formError && <p className="creative-error" role="alert">{formError}</p>}
       <button className="creative-primary" type="submit"><Plus size={14}/>{isCaption ? 'Add caption' : 'Add title'}</button>
     </form>
@@ -128,6 +157,26 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
     {shownOverlays.length ? <div className="overlay-list">{shownOverlays.map((overlay) => <section className="overlay-card" key={overlay.id}>
       <div className="overlay-card-head"><button className="overlay-time" onClick={() => onSetPlayhead(overlay.start)}>{overlay.start.toFixed(1)}s · {overlay.duration.toFixed(1)}s</button><button className="effect-remove" aria-label={`Remove ${isCaption ? 'caption' : 'title'}: ${overlay.text.slice(0, 40)}`} onClick={() => onRemoveOverlay(overlay.id)}><Trash2 size={13}/></button></div>
       <textarea aria-label={`Edit ${isCaption ? 'caption' : 'title'}`} value={overlay.text} onChange={(event) => onUpdateOverlay({ ...overlay, text: event.target.value })}/>
+      <div className="creative-form-row">
+        <label>Font<select aria-label={`Font for ${overlay.text}`} value={overlay.fontFamily ?? 'Manrope'} onChange={(event) => onUpdateOverlay({ ...overlay, fontFamily: event.target.value as NonNullable<TextOverlay['fontFamily']> })}><option value="Manrope">Manrope</option><option value="Arial">Arial</option><option value="Georgia">Georgia</option></select></label>
+        <label>Size<input aria-label={`Size for ${overlay.text}`} type="number" min="14" max="160" value={overlay.fontSize} onChange={(event) => {
+          const value = Number(event.target.value);
+          if (Number.isFinite(value) && value >= 14 && value <= 160) onUpdateOverlay({ ...overlay, fontSize: value });
+        }}/></label>
+      </div>
+      <div className="creative-form-row creative-style-row">
+        <label>Color<input aria-label={`Color for ${overlay.text}`} type="color" value={overlay.color} onChange={(event) => onUpdateOverlay({ ...overlay, color: event.target.value })}/></label>
+        <label>Outline<input aria-label={`Outline color for ${overlay.text}`} type="color" value={overlay.outlineColor ?? '#111111'} onChange={(event) => onUpdateOverlay({ ...overlay, outlineColor: event.target.value })}/></label>
+        <label>Width<input aria-label={`Outline width for ${overlay.text}`} type="number" min="0" max="12" value={overlay.outlineWidth ?? 0} onChange={(event) => {
+          const value = Number(event.target.value);
+          if (Number.isFinite(value) && value >= 0 && value <= 12) onUpdateOverlay({ ...overlay, outlineWidth: value });
+        }}/></label>
+      </div>
+      <div className="creative-form-row">
+        <label>Position<select aria-label={`Position for ${overlay.text}`} value={overlay.position} onChange={(event) => onUpdateOverlay({ ...overlay, position: event.target.value as TextOverlay['position'] })}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
+        <label>Weight<select aria-label={`Weight for ${overlay.text}`} value={overlay.fontWeight ?? 'bold'} onChange={(event) => onUpdateOverlay({ ...overlay, fontWeight: event.target.value as NonNullable<TextOverlay['fontWeight']> })}><option value="normal">Regular</option><option value="bold">Bold</option></select></label>
+      </div>
+      <label className="creative-check"><input aria-label={`Italic for ${overlay.text}`} type="checkbox" checked={overlay.italic ?? false} onChange={(event) => onUpdateOverlay({ ...overlay, italic: event.target.checked })}/> Italic</label>
     </section>)}</div> : <div className="creative-empty">Nothing here yet. Add one above.</div>}
   </div>;
 }

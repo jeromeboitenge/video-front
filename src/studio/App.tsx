@@ -56,7 +56,7 @@ function TimelineComposition({ items, mediaUrls, effects, overlays, playhead, on
       </div>;
     })}
     {!visuals.length && <div className="timeline-composition-empty">No visual clip at this time</div>}
-    {overlays.filter((overlay) => playhead >= overlay.start && playhead < overlay.start + overlay.duration).map((overlay) => <div key={overlay.id} className={`timeline-text-overlay ${overlay.kind} position-${overlay.position}`} style={{ color: overlay.color, fontSize: `${Math.max(12, overlay.fontSize * 0.28)}px` }}>{overlay.text}</div>)}
+    {overlays.filter((overlay) => playhead >= overlay.start && playhead < overlay.start + overlay.duration).map((overlay) => <div key={overlay.id} className={`timeline-text-overlay ${overlay.kind} position-${overlay.position}`} style={{ color: overlay.color, fontSize: `${Math.max(12, overlay.fontSize * 0.28)}px`, fontFamily: overlay.fontFamily ?? 'Manrope', fontWeight: overlay.fontWeight ?? 'bold', fontStyle: overlay.italic ? 'italic' : 'normal', WebkitTextStroke: `${overlay.outlineWidth ?? 0}px ${overlay.outlineColor ?? '#111111'}` }}>{overlay.text}</div>)}
     {items.filter(({ track, asset }) => track.kind === 'audio' && (asset.kind === 'audio' || asset.kind === 'video')).map(({ clip, asset }) => {
       const url = mediaUrls[asset.id];
       return url ? <audio key={clip.id} ref={(element) => onMediaElement(clip.id, element)} src={url} preload="auto" onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/> : null;

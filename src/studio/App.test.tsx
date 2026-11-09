@@ -26,6 +26,33 @@ describe('editor media and timeline flow', () => {
     expect(parseProjectDocument(olderDocument)).toMatchObject({ effects: [], textOverlays: [] });
   });
 
+  it('updates and saves canvas background and safe-margin settings', async () => {
+    render(<App />);
+
+    const safeAreaButton = screen.getByRole('button', { name: 'Safe area' });
+    const safeMarginsSwitch = screen.getByRole('button', { name: 'Safe margins' });
+    expect(safeAreaButton.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByText('SAFE AREA')).toBeTruthy();
+
+    fireEvent.click(safeAreaButton);
+    expect(safeMarginsSwitch.getAttribute('aria-pressed')).toBe('false');
+    expect(screen.queryByText('SAFE AREA')).toBeNull();
+    fireEvent.click(safeMarginsSwitch);
+    expect(safeAreaButton.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByTitle('Undo · Ctrl Z'));
+    expect(safeMarginsSwitch.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(screen.getByTitle('Redo · Ctrl Shift Z'));
+    expect(safeMarginsSwitch.getAttribute('aria-pressed')).toBe('true');
+
+    fireEvent.change(screen.getByLabelText('Canvas background color'), { target: { value: '#ff0000' } });
+    expect((document.querySelector('.canvas-gradient') as HTMLElement).style.background).toBe('rgb(255, 0, 0)');
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.canvas.background).toBe('#ff0000');
+      expect(saved.settings.safeMargins).toBe(true);
+    });
+  });
+
   it('rejects visual transform values outside supported bounds', () => {
     const project = makeProject();
     project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 1, sourceOffset: 0, scale: 8 }];
@@ -87,6 +114,24 @@ describe('editor media and timeline flow', () => {
       const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
       expect(saved.textOverlays?.[0]).toMatchObject({ kind: 'caption', text: 'Hello there', start: 0, duration: 2 });
     });
+  });
+
+  it('imports WebVTT subtitles and downloads editable captions as WebVTT', async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Captions' }));
+    const vtt = new File(['WEBVTT\n\n00:01.000 --> 00:02.500\nWebVTT caption'], 'captions.vtt', { type: 'text/vtt' });
+    Object.defineProperty(vtt, 'text', { value: async () => 'WEBVTT\n\n00:01.000 --> 00:02.500\nWebVTT caption' });
+    fireEvent.change(document.querySelector<HTMLInputElement>('input[type="file"]')!, { target: { files: [vtt] } });
+
+    expect(await screen.findByText('WebVTT caption', { selector: '.timeline-text-overlay' })).toBeTruthy();
+    const clickLink = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      expect(this.download).toBe('captions.vtt');
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Export .vtt' }));
+
+    expect(URL.createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: 'text/vtt;charset=utf-8' }));
+    expect(clickLink).toHaveBeenCalledOnce();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:frameforge-test');
   });
 
   it('applies a fade to the selected timeline clip', async () => {

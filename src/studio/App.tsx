@@ -93,6 +93,7 @@ export default function App() {
       return parseProjectDocument(JSON.parse(previous));
     } catch { return makeProject(); }
   });
+  const safeMarginsEnabled = project.settings.safeMargins !== false;
   const [activeTool, setActiveTool] = useState<ToolId>('media');
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(0);
@@ -463,6 +464,9 @@ export default function App() {
   function commit(next: ProjectDocument) { undoStack.current.push(project); redoStack.current = []; setProject(next); setSaved(false); }
   function undo() { const prior = undoStack.current.pop(); if (prior) { redoStack.current.push(project); setProject(prior); setSaved(false); } }
   function redo() { const next = redoStack.current.pop(); if (next) { undoStack.current.push(project); setProject(next); setSaved(false); } }
+  function toggleSafeMargins() {
+    commit({ ...project, settings: { ...project.settings, safeMargins: !safeMarginsEnabled } });
+  }
   function addTrack(kind: 'video' | 'audio') {
     const label = kind === 'video' ? 'Video' : 'Audio';
     let number = 1;
@@ -961,16 +965,16 @@ export default function App() {
       </aside>
 
       <section className="editor-main">
-        <div className="canvas-toolbar"><div className="canvas-select"><span className="canvas-dot"/><span>Canvas</span><span className="toolbar-muted">·</span><label className="canvas-preset-select"><select aria-label="Canvas aspect ratio" value={canvasPresetId(project.canvas.width, project.canvas.height)} onChange={(event) => updateCanvasPreset(event.target.value)}>{CANVAS_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}<option value="custom" disabled>Custom {project.canvas.width} × {project.canvas.height}</option></select><ChevronDown size={12}/></label><button className="mobile-import" onClick={() => fileRef.current?.click()}><Upload size={14}/>Import</button></div><div className="canvas-tools"><button className="tool-chip"><Frame size={14}/>Safe area</button><span className="toolbar-separator"/><button className="icon-button tiny" title="Zoom out" onClick={() => setCanvasZoom((value) => Math.max(0.5, value - 0.1))}><ZoomOut size={15}/></button><button className="zoom-value" onClick={() => setCanvasZoom(1)}>{Math.round(canvasZoom * 100)}%</button><button className="icon-button tiny" title="Zoom in" onClick={() => setCanvasZoom((value) => Math.min(1.5, value + 0.1))}><ZoomIn size={15}/></button><button className="icon-button tiny" title="Fit to screen" onClick={() => setCanvasZoom(1)}><Maximize2 size={14}/></button></div></div>
+        <div className="canvas-toolbar"><div className="canvas-select"><span className="canvas-dot"/><span>Canvas</span><span className="toolbar-muted">·</span><label className="canvas-preset-select"><select aria-label="Canvas aspect ratio" value={canvasPresetId(project.canvas.width, project.canvas.height)} onChange={(event) => updateCanvasPreset(event.target.value)}>{CANVAS_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}<option value="custom" disabled>Custom {project.canvas.width} × {project.canvas.height}</option></select><ChevronDown size={12}/></label><button className="mobile-import" onClick={() => fileRef.current?.click()}><Upload size={14}/>Import</button></div><div className="canvas-tools"><button className="tool-chip" aria-pressed={safeMarginsEnabled} onClick={toggleSafeMargins}><Frame size={14}/>Safe area</button><span className="toolbar-separator"/><button className="icon-button tiny" title="Zoom out" onClick={() => setCanvasZoom((value) => Math.max(0.5, value - 0.1))}><ZoomOut size={15}/></button><button className="zoom-value" onClick={() => setCanvasZoom(1)}>{Math.round(canvasZoom * 100)}%</button><button className="icon-button tiny" title="Zoom in" onClick={() => setCanvasZoom((value) => Math.min(1.5, value + 0.1))}><ZoomIn size={15}/></button><button className="icon-button tiny" title="Fit to screen" onClick={() => setCanvasZoom(1)}><Maximize2 size={14}/></button></div></div>
         <div className="preview-stage">
           <div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/>
           <div className="canvas-frame" style={{ aspectRatio: `${project.canvas.width} / ${project.canvas.height}`, transform: `scale(${canvasZoom})` }}>
-            <div className="canvas-gradient">
+            <div className="canvas-gradient" style={{ background: project.canvas.background }}>
               {previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} colorAdjustments={project.colorAdjustments} overlays={project.textOverlays} playhead={playhead} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
                 {selectedAsset.kind === 'video' ? <video src={mediaUrls[selectedAsset.id]} style={{ filter: previewEffect.filter }} playsInline controls/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name} style={{ filter: previewEffect.filter }}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls/></div>}
                 {selectedAsset.kind !== 'audio' && previewEffect.vignette > 0 && <div className="preview-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${previewEffect.vignette * 0.78}) 100%)` }}/>}
               </div> : <><div className="canvas-glow one"/><div className="canvas-glow two"/><div className="canvas-center"><div className="center-mark"><Clapperboard size={21}/></div><span className="canvas-overline">{selectedAsset ? 'MEDIA PREVIEW' : 'YOUR NEXT STORY'}</span><strong>{selectedAsset ? selectedAsset.name : <>Make room<br/>for the <em>moment.</em></>}</strong><span className="canvas-caption">{selectedAsset ? loadingAssetId === selectedAsset.id ? 'Restoring media…' : 'Media preview is unavailable on this device.' : 'A new canvas is a blank invitation.'}</span></div></>}
-              <div className="canvas-safe"><span>SAFE AREA</span></div>
+              {safeMarginsEnabled && <div className="canvas-safe"><span>SAFE AREA</span></div>}
             </div>
           </div>
           <div className="preview-hint"><span className="hint-pulse"/>PREVIEW <span className="hint-divider"/> {project.canvas.width} × {project.canvas.height}</div>
@@ -1027,7 +1031,7 @@ export default function App() {
               </select>
             </label>
           </section>
-          <section className="inspector-section"><div className="section-title"><span>CANVAS</span></div><div className="inspector-property"><span>Background</span><button className="color-picker"><i style={{ background: project.canvas.background }}/><span>{project.canvas.background}</span><ChevronDown size={12}/></button></div><div className="inspector-property"><span>Safe margins</span><button className="switch on"><i/></button></div><div className="inspector-property"><span>Background fill</span><button className="switch"><i/></button></div></section>
+          <section className="inspector-section"><div className="section-title"><span>CANVAS</span></div><div className="inspector-property"><span>Background</span><label className="color-picker"><input aria-label="Canvas background color" type="color" value={project.canvas.background} style={{ width: 18, height: 18, padding: 0, border: 0, borderRadius: 3, background: 'transparent', cursor: 'pointer' }} onChange={(event) => commit({ ...project, canvas: { ...project.canvas, background: event.currentTarget.value } })}/><span>{project.canvas.background}</span></label></div><div className="inspector-property"><span>Safe margins</span><button className={`switch${safeMarginsEnabled ? ' on' : ''}`} aria-label="Safe margins" aria-pressed={safeMarginsEnabled} onClick={toggleSafeMargins}><i/></button></div></section>
           <section className="inspector-section layer-summary"><div className="section-title"><span>LAYERS</span><button className="icon-button subtle"><Plus size={15}/></button></div>{project.tracks.map((track) => <div className="layer-row" key={track.id}><span className="track-color" style={{ background: track.color }}/><span>{track.name}</span><button title="Lock layer"><LockKeyhole size={12}/></button></div>)}</section>
           <div className="inspector-tip"><Sparkles size={14}/><span>Select a layer or clip to see its editing controls here.</span></div>
         </div>

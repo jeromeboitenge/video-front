@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Captions, FileUp, Plus, Sparkles, Trash2 } from 'lucide-react';
 import type { TextOverlay, TimelineClip, ToolId } from './model';
-import { parseSubRip } from './subtitles';
+import { parseSubRip, parseWebVtt, serializeWebVtt } from './subtitles';
 
 type CreativeTool = Extract<ToolId, 'text' | 'captions' | 'transitions' | 'ai'>;
 
@@ -83,13 +83,31 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
     if (!file) return;
     setFileError('');
     try {
-      const imported = parseSubRip(await file.text()).map((overlay) => ({ ...overlay, id: crypto.randomUUID() }));
+      const contents = await file.text();
+      const parser = file.name.toLowerCase().endsWith('.vtt') || contents.trimStart().startsWith('WEBVTT')
+        ? parseWebVtt
+        : parseSubRip;
+      const imported = parser(contents).map((overlay) => ({ ...overlay, id: crypto.randomUUID() }));
       onAddOverlays(imported);
       setFileError('');
     } catch (error) {
       setFileError((error as Error).message);
     } finally {
       if (fileInput.current) fileInput.current.value = '';
+    }
+  }
+
+  function exportSubtitles() {
+    try {
+      const contents = serializeWebVtt(shownOverlays);
+      const url = URL.createObjectURL(new Blob([contents], { type: 'text/vtt;charset=utf-8' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'captions.vtt';
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setFileError((error as Error).message);
     }
   }
 
@@ -124,10 +142,11 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
 
   const shownOverlays = overlays.filter((overlay) => overlay.kind === (isCaption ? 'caption' : 'title'));
   return <div className="creative-panel">
-    <div className="creative-intro"><span className="eyebrow">{isCaption ? 'SUBTITLES' : 'TEXT LAYERS'}</span><p>{isCaption ? 'Write captions for your sequence or import a timed SubRip subtitle file.' : 'Add timed titles to the text layer and style them on the canvas.'}</p></div>
+    <div className="creative-intro"><span className="eyebrow">{isCaption ? 'SUBTITLES' : 'TEXT LAYERS'}</span><p>{isCaption ? 'Write captions or import/export timed SRT and WebVTT subtitles.' : 'Add timed titles to the text layer and style them on the canvas.'}</p></div>
     {isCaption && <div className="subtitle-import">
-      <input ref={fileInput} type="file" accept=".srt,application/x-subrip,text/plain" hidden onChange={(event) => void importSubtitles(event.target.files?.[0])}/>
-      <button className="creative-secondary" onClick={() => fileInput.current?.click()}><FileUp size={14}/>Import .srt</button>
+      <input ref={fileInput} type="file" accept=".srt,.vtt,application/x-subrip,text/vtt,text/plain" hidden onChange={(event) => void importSubtitles(event.target.files?.[0])}/>
+      <button className="creative-secondary" onClick={() => fileInput.current?.click()}><FileUp size={14}/>Import .srt or .vtt</button>
+      {shownOverlays.length > 0 && <button className="creative-secondary" onClick={exportSubtitles}>Export .vtt</button>}
       {fileError && <p className="creative-error" role="alert">{fileError}</p>}
     </div>}
     <form className="creative-form" onSubmit={addText}>

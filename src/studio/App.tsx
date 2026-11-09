@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
-import { AudioLines, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
-import { clipTransformStyle, clipVisualOpacityAt, formatTime, makeProject, parseProjectDocument, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId } from './model';
+import { AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
+import { clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, makeProject, parseProjectDocument, type ClipKeyframe, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId } from './model';
 import { effectRegistry, effectStyle, type AppliedEffect, type EffectId } from './effects';
 import { audioGainAt, renderProjectVideo } from './export';
-import { authenticate, getCloudMediaContent, getCloudProject, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';
+import { authenticate, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';
 import { readMedia, storeMedia } from './mediaStore';
 import { CreativeToolsPanel } from './CreativeToolsPanel';
+import { AdminPanel, OrganizationRequestForm, SupportTicketForm } from './AdminPanel';
 import './export.css';
 
 const tools: { id: ToolId; label: string; icon: typeof Film }[] = [
@@ -48,8 +49,8 @@ function TimelineComposition({ items, mediaUrls, effects, overlays, playhead, on
       const url = mediaUrls[asset.id];
       const style = effectStyle(effects, asset.id);
       return <div className="timeline-composition-layer" key={clip.id} data-clip-id={clip.id} aria-label={asset.name} style={{ opacity: clipVisualOpacityAt(clip, playhead) }}>
-        {url && asset.kind === 'video' && <video ref={(element) => onMediaElement(clip.id, element)} src={url} style={{ filter: style.filter, transform: clipTransformStyle(clip) }} playsInline preload="auto" muted onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/>}
-        {url && asset.kind === 'image' && <img src={url} alt={asset.name} style={{ filter: style.filter, transform: clipTransformStyle(clip) }}/>}
+        {url && asset.kind === 'video' && <video ref={(element) => onMediaElement(clip.id, element)} src={url} style={{ filter: style.filter, transform: clipTransformStyle(clip, playhead - clip.start) }} playsInline preload="auto" muted onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/>}
+        {url && asset.kind === 'image' && <img src={url} alt={asset.name} style={{ filter: style.filter, transform: clipTransformStyle(clip, playhead - clip.start) }}/>}
         {!url && <div className="timeline-media-unavailable">{asset.name}</div>}
         {style.vignette > 0 && <span className="timeline-media-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${style.vignette * 0.78}) 100%)` }}/>}
       </div>;
@@ -85,11 +86,19 @@ export default function App() {
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [organizationRequestOpen, setOrganizationRequestOpen] = useState(false);
+  const [supportTicketOpen, setSupportTicketOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [currentUser, setCurrentUser] = useState<{ id: string; email: string } | null>(() => { try { const user = sessionStorage.getItem('frameforge:user'); return user ? JSON.parse(user) : null; } catch { return null; } });
+  const [currentUser, setCurrentUser] = useState<{ id: string; email: string; is_admin: boolean } | null>(() => {
+    try {
+      const user = JSON.parse(sessionStorage.getItem('frameforge:user') ?? 'null') as { id?: unknown; email?: unknown } | null;
+      return user && typeof user.id === 'string' && typeof user.email === 'string' ? { id: user.id, email: user.email, is_admin: false } : null;
+    } catch { return null; }
+  });
+  const [adminPanelOpen, setAdminPanelOpen] = useState(false);
   const [cloudProjectId, setCloudProjectId] = useState(() => {
     try { const user = JSON.parse(sessionStorage.getItem('frameforge:user') ?? 'null') as { id?: string } | null; return user?.id ? localStorage.getItem(cloudProjectKey(user.id, project.project.id)) ?? '' : ''; } catch { return ''; }
   });
@@ -121,6 +130,10 @@ export default function App() {
   const selectedAsset = project.assets.find((asset) => asset.id === selectedAssetId);
   const selectedClip = project.clips.find((clip) => clip.id === selectedClipId);
   const selectedClipTrack = project.tracks.find((track) => track.id === selectedClip?.trackId);
+  const selectedClipLocalTime = selectedClip ? Math.max(0, Math.min(selectedClip.duration, playhead - selectedClip.start)) : 0;
+  const selectedVisualTransform = selectedClip ? clipTransformAt(selectedClip, selectedClipLocalTime) : { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 };
+  const selectedKeyframeTime = selectedClip ? Math.min(selectedClip.duration, Math.round(selectedClipLocalTime * project.canvas.fps) / project.canvas.fps) : 0;
+  const selectedKeyframe = selectedClip?.keyframes?.find((keyframe) => Math.abs(keyframe.time - selectedKeyframeTime) < 0.0001);
   const sequenceDuration = lastClipEnd;
   const activeTimelineItems = useMemo(() => {
     const assets = new Map(project.assets.map((asset) => [asset.id, asset]));
@@ -140,6 +153,23 @@ export default function App() {
   const setTimelineMediaElement = useCallback((clipId: string, element: HTMLMediaElement | null) => {
     if (element) timelineMediaRefs.current.set(clipId, element);
     else timelineMediaRefs.current.delete(clipId);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionStorage.getItem('frameforge:access-token')) return;
+    let active = true;
+    void getCurrentUser().then((user) => {
+      if (!active) return;
+      setCurrentUser(user);
+      sessionStorage.setItem('frameforge:user', JSON.stringify(user));
+      if (!user.is_admin) setAdminPanelOpen(false);
+    }).catch((reason: Error) => {
+      if (active) {
+        setCurrentUser((user) => user ? { ...user, is_admin: false } : null);
+        setNotice(`Could not refresh account permissions: ${reason.message}`);
+      }
+    });
+    return () => { active = false; };
   }, []);
 
   useEffect(() => { playheadRef.current = playhead; }, [playhead]);
@@ -360,6 +390,7 @@ export default function App() {
   }, [projectMenuOpen, currentUser]);
 
   useEffect(() => {
+    if (adminPanelOpen) return;
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); }
       else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveDraft(); }
@@ -465,7 +496,27 @@ export default function App() {
     if (patch.rotation !== undefined && Number.isFinite(patch.rotation)) safePatch.rotation = Math.max(-3600, Math.min(3600, patch.rotation));
     if (patch.opacity !== undefined && Number.isFinite(patch.opacity)) safePatch.opacity = Math.max(0, Math.min(1, patch.opacity));
     if (!Object.keys(safePatch).length) return;
-    commit({ ...project, clips: project.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, ...safePatch } : clip) });
+    const updated = selectedClip.keyframes?.length
+      ? (() => {
+        const values = { ...clipTransformAt(selectedClip, selectedClipLocalTime), ...safePatch };
+        const keyframe: ClipKeyframe = { time: selectedKeyframeTime, ...values };
+        const keyframes = [...selectedClip.keyframes.filter((item) => Math.abs(item.time - selectedKeyframeTime) >= 0.0001), keyframe].sort((a, b) => a.time - b.time);
+        return { ...selectedClip, keyframes };
+      })()
+      : { ...selectedClip, ...safePatch };
+    commit({ ...project, clips: project.clips.map((clip) => clip.id === selectedClip.id ? updated : clip) });
+  }
+  function addVisualKeyframe() {
+    if (!selectedClip) return;
+    const transform: ClipKeyframe = { time: selectedKeyframeTime, ...clipTransformAt(selectedClip, selectedClipLocalTime) };
+    const keyframes = [...(selectedClip.keyframes ?? []).filter((item) => Math.abs(item.time - selectedKeyframeTime) >= 0.0001), transform].sort((a, b) => a.time - b.time);
+    commit({ ...project, clips: project.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, keyframes } : clip) });
+    setNotice(`Keyframe ${selectedKeyframe ? 'updated' : 'added'} at ${selectedKeyframeTime.toFixed(2)} seconds.`);
+  }
+  function removeVisualKeyframe() {
+    if (!selectedClip || !selectedKeyframe) return;
+    const keyframes = selectedClip.keyframes?.filter((item) => item !== selectedKeyframe) ?? [];
+    commit({ ...project, clips: project.clips.map((clip) => clip.id === selectedClip.id ? { ...clip, keyframes } : clip) });
   }
   function startTimelineDrag(event: ReactPointerEvent<HTMLButtonElement>, clip: TimelineClip) {
     if (event.button > 0) return;
@@ -568,7 +619,7 @@ export default function App() {
     } catch (error) { setAuthError((error as Error).message); }
     finally { setAuthBusy(false); }
   }
-  function signOut() { sessionStorage.removeItem('frameforge:access-token'); sessionStorage.removeItem('frameforge:user'); setCurrentUser(null); setCloudProjectId(''); setAccountOpen(false); setNotice('Signed out. This device draft remains available.'); }
+  function signOut() { sessionStorage.removeItem('frameforge:access-token'); sessionStorage.removeItem('frameforge:user'); setCurrentUser(null); setCloudProjectId(''); setAccountOpen(false); setAdminPanelOpen(false); setNotice('Signed out. This device draft remains available.'); }
   function startNewProject() {
     localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
     setProject(makeProject()); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(''); setProjectMenuOpen(false); setSaved(false);
@@ -645,6 +696,8 @@ export default function App() {
 
   const toolTitle: Record<ToolId, string> = { media: 'Project media', audio: 'Audio library', text: 'Typography', captions: 'Captions', elements: 'Elements', effects: 'Effects', transitions: 'Transitions', ai: 'AI studio' };
 
+  if (adminPanelOpen && currentUser?.is_admin) return <AdminPanel email={currentUser.email} onBack={() => setAdminPanelOpen(false)} onSignOut={signOut}/>;
+
   return <main className="studio">
     <header className="topbar">
       <div className="brand"><span className="brand-mark"><Clapperboard size={15}/></span><span>frameforge</span><span className="brand-divider"/><span className="studio-label">STUDIO</span></div>
@@ -665,7 +718,7 @@ export default function App() {
         </div>}
         <span className={`save-indicator ${saved ? '' : 'unsaved'}`}><Cloud size={13}/>{saved ? 'All changes saved' : 'Unsaved changes'}</span>
       </div>
-      <div className="top-actions"><button className="icon-button" title="Undo · Ctrl Z" onClick={undo}><Undo2 size={16}/></button><button className="icon-button" title="Redo · Ctrl Shift Z" onClick={redo}><Redo2 size={16}/></button><span className="top-divider"/><button className="icon-button" title="Help"><CircleHelp size={16}/></button><button className="avatar" aria-label="Account" onClick={() => { setAuthError(''); setAccountOpen(true); }}>{currentUser ? currentUser.email.slice(0, 1).toUpperCase() : 'A'}</button><button className="export-button" onClick={() => { setExportError(''); setExportOpen(true); }}><Download size={15}/>Export</button></div>
+      <div className="top-actions">{currentUser?.is_admin && <button className="admin-launch-button" onClick={() => setAdminPanelOpen(true)}><Building2 size={14}/>Admin</button>}<button className="icon-button" title="Undo · Ctrl Z" onClick={undo}><Undo2 size={16}/></button><button className="icon-button" title="Redo · Ctrl Shift Z" onClick={redo}><Redo2 size={16}/></button><span className="top-divider"/><button className="icon-button" title="Help"><CircleHelp size={16}/></button><button className="avatar" aria-label="Account" onClick={() => { setAuthError(''); setAccountOpen(true); }}>{currentUser ? currentUser.email.slice(0, 1).toUpperCase() : 'A'}</button><button className="export-button" onClick={() => { setExportError(''); setExportOpen(true); }}><Download size={15}/>Export</button></div>
     </header>
     <section className="workspace">
       <nav className="tool-rail" aria-label="Creative tools">
@@ -694,14 +747,15 @@ export default function App() {
         </div> : activeTool === 'effects' ? <div className="effects-panel">
           {selectedClip && selectedClipTrack?.kind === 'video' && project.assets.find((asset) => asset.id === selectedClip.assetId)?.kind !== 'audio' && <section className="visual-clip-control">
             <header><span>CLIP TRANSFORM</span><button type="button" className="effect-remove" onClick={() => updateVisualTransform({ x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 })}>Reset</button></header>
+            <div className="keyframe-toolbar"><span>{selectedClip.keyframes?.length ?? 0} keyframes</span><button type="button" aria-label={selectedKeyframe ? 'Update keyframe' : 'Add keyframe'} onClick={addVisualKeyframe}>{selectedKeyframe ? 'Update keyframe' : 'Add keyframe'} · {selectedKeyframeTime.toFixed(2)}s</button>{selectedKeyframe && <button type="button" aria-label="Remove keyframe" onClick={removeVisualKeyframe}>Remove</button>}</div>
             <div className="visual-transform-grid">
-              <label>Position X<input aria-label="Position X" type="number" min="-100000" max="100000" step="1" value={selectedClip.x ?? 0} onChange={(event) => updateVisualTransform({ x: event.currentTarget.valueAsNumber })}/></label>
-              <label>Position Y<input aria-label="Position Y" type="number" min="-100000" max="100000" step="1" value={selectedClip.y ?? 0} onChange={(event) => updateVisualTransform({ y: event.currentTarget.valueAsNumber })}/></label>
-              <label>Scale (%)<input aria-label="Scale" type="number" min="10" max="500" step="1" value={Math.round((selectedClip.scale ?? 1) * 100)} onChange={(event) => updateVisualTransform({ scale: event.currentTarget.valueAsNumber / 100 })}/></label>
-              <label>Rotation<input aria-label="Rotation" type="number" min="-3600" max="3600" step="1" value={selectedClip.rotation ?? 0} onChange={(event) => updateVisualTransform({ rotation: event.currentTarget.valueAsNumber })}/></label>
+              <label>Position X<input aria-label="Position X" type="number" min="-100000" max="100000" step="1" value={selectedVisualTransform.x} onChange={(event) => updateVisualTransform({ x: event.currentTarget.valueAsNumber })}/></label>
+              <label>Position Y<input aria-label="Position Y" type="number" min="-100000" max="100000" step="1" value={selectedVisualTransform.y} onChange={(event) => updateVisualTransform({ y: event.currentTarget.valueAsNumber })}/></label>
+              <label>Scale (%)<input aria-label="Scale" type="number" min="10" max="500" step="1" value={Math.round(selectedVisualTransform.scale * 100)} onChange={(event) => updateVisualTransform({ scale: event.currentTarget.valueAsNumber / 100 })}/></label>
+              <label>Rotation<input aria-label="Rotation" type="number" min="-3600" max="3600" step="1" value={selectedVisualTransform.rotation} onChange={(event) => updateVisualTransform({ rotation: event.currentTarget.valueAsNumber })}/></label>
             </div>
-            <label className="visual-opacity-label" htmlFor="clip-opacity">Opacity <output>{Math.round((selectedClip.opacity ?? 1) * 100)}%</output></label>
-            <input id="clip-opacity" aria-label="Clip opacity" type="range" min="0" max="1" step="0.01" value={selectedClip.opacity ?? 1} onChange={(event) => updateVisualTransform({ opacity: Number(event.target.value) })}/>
+            <label className="visual-opacity-label" htmlFor="clip-opacity">Opacity <output>{Math.round(selectedVisualTransform.opacity * 100)}%</output></label>
+            <input id="clip-opacity" aria-label="Clip opacity" type="range" min="0" max="1" step="0.01" value={selectedVisualTransform.opacity} onChange={(event) => updateVisualTransform({ opacity: Number(event.target.value) })}/>
           </section>}
           <div className="effects-intro"><span className="eyebrow">PREVIEW EFFECTS</span><p>Non-destructive color and lens adjustments for the selected image or video.</p></div>
           {!selectedAsset && <div className="effects-empty">Select an image or video in your media library to apply an effect.</div>}
@@ -777,7 +831,7 @@ export default function App() {
         <p className="export-note">WebM rendering runs in real time and includes timeline video, images, audio, text overlays, fades, and supported effects. AI generation requires an external provider and is not included.</p>
       </section>
     </div>}
-    {accountOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAccountOpen(false); }}><section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="account-title"><button className="modal-close" aria-label="Close" onClick={() => setAccountOpen(false)}>×</button><div className="modal-mark"><Clapperboard size={18}/></div><span className="eyebrow">FRAMEFORGE ACCOUNT</span><h2 id="account-title">{currentUser ? 'Your workspace' : authMode === 'login' ? 'Welcome back' : 'Create your account'}</h2>{currentUser ? <><p className="modal-description">Signed in as <strong>{currentUser.email}</strong>. Your project can sync to your account.</p><button className="modal-submit" onClick={saveDraft}>Sync this project</button><button className="modal-secondary" onClick={signOut}>Sign out</button></> : <form onSubmit={submitAuth}><p className="modal-description">Sign in to sync your project. Your local draft stays on this device.</p><label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} required minLength={10} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 10 characters"/></label>{authError && <p className="auth-error" role="alert">{authError}</p>}<button className="modal-submit" disabled={authBusy}>{authBusy ? 'Connecting…' : authMode === 'login' ? 'Sign in and sync' : 'Create account'}</button><button type="button" className="modal-secondary" onClick={() => { setAuthError(''); setAuthMode(authMode === 'login' ? 'register' : 'login'); }}>{authMode === 'login' ? 'New to Frameforge? Create account' : 'Already have an account? Sign in'}</button></form>}</section></div>}
+    {accountOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) { setAccountOpen(false); setOrganizationRequestOpen(false); setSupportTicketOpen(false); } }}><section className={`account-modal ${organizationRequestOpen || supportTicketOpen ? 'account-modal-request' : ''}`} role="dialog" aria-modal="true" aria-labelledby="account-title"><button className="modal-close" aria-label="Close" onClick={() => { setAccountOpen(false); setOrganizationRequestOpen(false); setSupportTicketOpen(false); }}>×</button><div className="modal-mark"><Clapperboard size={18}/></div><span className="eyebrow">FRAMEFORGE ACCOUNT</span><h2 id="account-title">{organizationRequestOpen ? 'Organisation request' : supportTicketOpen ? 'Contact support' : currentUser ? 'Your workspace' : authMode === 'login' ? 'Welcome back' : 'Create your account'}</h2>{currentUser ? organizationRequestOpen ? <OrganizationRequestForm/> : supportTicketOpen ? <SupportTicketForm/> : <><p className="modal-description">Signed in as <strong>{currentUser.email}</strong>. Your project can sync to your account.</p><button className="modal-submit" onClick={saveDraft}>Sync this project</button><button className="modal-secondary" onClick={() => setOrganizationRequestOpen(true)}>Request an organisation</button><button className="modal-secondary" onClick={() => setSupportTicketOpen(true)}>Contact support</button><button className="modal-secondary" onClick={signOut}>Sign out</button></> : <form onSubmit={submitAuth}><p className="modal-description">Sign in to sync your project. Your local draft stays on this device.</p><label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} required minLength={10} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 10 characters"/></label>{authError && <p className="auth-error" role="alert">{authError}</p>}<button className="modal-submit" disabled={authBusy}>{authBusy ? 'Connecting…' : authMode === 'login' ? 'Sign in and sync' : 'Create account'}</button><button type="button" className="modal-secondary" onClick={() => { setAuthError(''); setAuthMode(authMode === 'login' ? 'register' : 'login'); }}>{authMode === 'login' ? 'New to Frameforge? Create account' : 'Already have an account? Sign in'}</button></form>}</section></div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button onClick={() => setNotice('')}>Dismiss</button></div>}
   </main>;
 }

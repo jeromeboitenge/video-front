@@ -27,6 +27,19 @@ describe('editor media and timeline flow', () => {
     expect(() => parseProjectDocument(project)).toThrow('This project document is not a supported Frameforge version.');
   });
 
+  it('accepts legacy clips without keyframes and rejects malformed keyframe sequences', () => {
+    const project = makeProject();
+    project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 2, sourceOffset: 0 }];
+    expect(parseProjectDocument(project).clips[0].keyframes).toBeUndefined();
+
+    const keyframe = { time: 0, x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 };
+    project.clips[0].keyframes = [keyframe, { ...keyframe, time: 0 }];
+    expect(() => parseProjectDocument(project)).toThrow('This project document is not a supported Frameforge version.');
+    project.clips[0].keyframes = [{ ...keyframe, scale: 10 }];
+    expect(() => parseProjectDocument(project)).toThrow('This project document is not a supported Frameforge version.');
+  });
+
   it('creates a timed title and persists it in the project', async () => {
     const project = makeProject();
     project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
@@ -100,6 +113,29 @@ describe('editor media and timeline flow', () => {
       expect.any(Function),
       expect.any(AbortSignal),
     );
+  });
+
+  it('shows the administrator workspace only after the API confirms admin access', async () => {
+    sessionStorage.setItem('frameforge:access-token', 'admin-token');
+    sessionStorage.setItem('frameforge:user', JSON.stringify({ id: 'admin-1', email: 'admin@example.com' }));
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const data = url.endsWith('/auth/me')
+        ? { id: 'admin-1', email: 'admin@example.com', is_admin: true }
+        : url.endsWith('/admin/dashboard/stats')
+          ? { organizations: 2, pending_requests: 1, approved_requests: 3, rejected_requests: 0, users: 18 }
+          : [];
+      return { ok: true, status: 200, json: async () => data } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Admin' }));
+
+    expect(await screen.findByRole('heading', { name: 'Reports' })).toBeTruthy();
+    expect(await screen.findByText('Awaiting approval')).toBeTruthy();
+    expect(screen.getByText('18')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Organisation management' }));
+    expect(await screen.findByRole('heading', { name: 'Organisation management' })).toBeTruthy();
   });
 
   it('previews the clip under the playhead and shows gaps when scrubbing', async () => {
@@ -249,6 +285,34 @@ describe('editor media and timeline flow', () => {
     });
   });
 
+  it('adds and edits frame-snapped visual transform keyframes', async () => {
+    vi.mocked(readMedia).mockResolvedValue(new Blob(['image'], { type: 'image/png' }));
+    const project = makeProject();
+    project.assets = [{ id: 'asset-1', name: 'portrait.png', kind: 'image', mimeType: 'image/png', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 2, sourceOffset: 0 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+    fireEvent.click(document.querySelector('.clip')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Effects' }));
+    fireEvent.click(screen.getByRole('button', { name: /Add keyframe/ }));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Position X' }), { target: { value: '90' } });
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].keyframes).toEqual([
+        { time: 0, x: 90, y: 0, scale: 1, rotation: 0, opacity: 1 },
+      ]);
+    });
+    expect(document.querySelector<HTMLImageElement>('.timeline-composition-layer img')?.style.transform).toBe('translate(90px, 0px) rotate(0deg) scale(1)');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove keyframe' }));
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips?.[0].keyframes).toHaveLength(1);
+    });
+  });
+
   it('applies audio clip fades in the preview and saves them with undo support', async () => {
     render(<App />);
     const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
@@ -372,6 +436,7 @@ describe('editor media and timeline flow', () => {
     };
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.endsWith('/auth/me')) return { ok: true, status: 200, json: async () => ({ id: 'user-1', email: 'creator@example.com', is_admin: false }) } as Response;
       const result = url.endsWith('/projects') ? [remoteProject] : remoteProject;
       return { ok: true, status: 200, json: async () => result } as Response;
     });
@@ -389,20 +454,19 @@ describe('editor media and timeline flow', () => {
 
   it('uploads imported media for signed-in users and saves the cloud media reference', async () => {
     sessionStorage.setItem('frameforge:access-token', 'test-token');
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
-      ok: true,
-      status: 201,
-      json: async () => ({ id: 'media-server-id', name: 'scene.mp4', mime_type: 'video/mp4', size: 5, created_at: '2026-01-01T00:00:00Z' }),
-    } as Response);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => String(input).endsWith('/auth/me')
+      ? { ok: true, status: 200, json: async () => ({ id: 'user-1', email: 'creator@example.com', is_admin: false }) } as Response
+      : { ok: true, status: 201, json: async () => ({ id: 'media-server-id', name: 'scene.mp4', mime_type: 'video/mp4', size: 5, created_at: '2026-01-01T00:00:00Z' }) } as Response);
 
     render(<App />);
     const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
     fireEvent.change(fileInput, { target: { files: [new File(['video'], 'scene.mp4', { type: 'video/mp4' })] } });
 
     await waitFor(() => expect(screen.getByText(/uploaded to your account/)).toBeTruthy());
-    const request = fetchMock.mock.calls[0];
-    expect(request[0]).toBe('http://localhost:8000/api/v1/media');
-    expect((request[1]?.body as FormData).get('file')).toBeInstanceOf(File);
+    const request = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/media'));
+    expect(request).toBeDefined();
+    expect(request?.[0]).toBe('http://localhost:8000/api/v1/media');
+    expect((request?.[1]?.body as FormData).get('file')).toBeInstanceOf(File);
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
       expect(saved.assets?.[0]?.cloudId).toBe('media-server-id');
@@ -429,6 +493,7 @@ describe('editor media and timeline flow', () => {
     };
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.endsWith('/auth/me')) return { ok: true, status: 200, json: async () => ({ id: 'user-1', email: 'creator@example.com', is_admin: false }) } as Response;
       if (url.endsWith('/projects')) return { ok: true, status: 200, json: async () => [remoteProject] } as Response;
       if (url.endsWith('/projects/cloud-project-2')) return { ok: true, status: 200, json: async () => remoteProject } as Response;
       return { ok: true, status: 200, blob: async () => new Blob(['video'], { type: 'video/mp4' }) } as Response;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clipOpacityAt, makeProject } from './model';
+import { clipOpacityAt, clipTransformAt, makeProject } from './model';
 import { applyClipTransform, audioGainAt, audioGainFor, createExportPlan } from './export';
 
 describe('video export plan', () => {
@@ -52,6 +52,28 @@ describe('video export plan', () => {
     }, 1080, 1920);
     expect(calls[0]).toEqual([630, 915]);
     expect(calls[1]?.[0]).toBeCloseTo(Math.PI / 2);
+    expect(calls[2]).toEqual([1.5, 1.5]);
+  });
+
+  it('interpolates keyframed transforms using clip-local time in preview and export', () => {
+    const clip = {
+      id: 'clip', assetId: 'image', trackId: 'video-1', start: 5, duration: 2, sourceOffset: 0,
+      keyframes: [
+        { time: 0, x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
+        { time: 1, x: 100, y: 40, scale: 2, rotation: 90, opacity: 0.5 },
+      ],
+    };
+    expect(clipTransformAt(clip, 0.5)).toEqual({ x: 50, y: 20, scale: 1.5, rotation: 45, opacity: 0.75 });
+
+    const calls: number[][] = [];
+    const context: Pick<CanvasRenderingContext2D, 'translate' | 'rotate' | 'scale'> = {
+      translate: (x, y) => { calls.push([x, y]); },
+      rotate: (angle) => { calls.push([angle]); },
+      scale: (x, y) => { calls.push([x, y]); },
+    };
+    applyClipTransform(context, clip, 1080, 1920, 0.5);
+    expect(calls[0]).toEqual([590, 980]);
+    expect(calls[1]?.[0]).toBeCloseTo(Math.PI / 4);
     expect(calls[2]).toEqual([1.5, 1.5]);
   });
 

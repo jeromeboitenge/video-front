@@ -1,6 +1,6 @@
 import { getCloudMediaContent } from './api';
 import { effectStyle } from './effects';
-import { clipOpacityAt, clipVisualOpacityAt, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
+import { clipOpacityAt, clipTransformAt, clipVisualOpacityAt, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
 import { readMedia } from './mediaStore';
 
 type ExportClip = {
@@ -30,10 +30,12 @@ export function applyClipTransform(
   clip: TimelineClip,
   width: number,
   height: number,
+  time = 0,
 ): void {
-  context.translate(width / 2 + (clip.x ?? 0), height / 2 + (clip.y ?? 0));
-  context.rotate((clip.rotation ?? 0) * Math.PI / 180);
-  context.scale(clip.scale ?? 1, clip.scale ?? 1);
+  const transform = clipTransformAt(clip, time);
+  context.translate(width / 2 + transform.x, height / 2 + transform.y);
+  context.rotate(transform.rotation * Math.PI / 180);
+  context.scale(transform.scale, transform.scale);
 }
 
 export function createExportPlan(project: ProjectDocument): ExportPlan {
@@ -114,11 +116,11 @@ function waitForSeek(media: HTMLMediaElement, seconds: number): Promise<void> {
   });
 }
 
-function drawCover(context: CanvasRenderingContext2D, source: CanvasImageSource, sourceWidth: number, sourceHeight: number, width: number, height: number, clip: TimelineClip) {
+function drawCover(context: CanvasRenderingContext2D, source: CanvasImageSource, sourceWidth: number, sourceHeight: number, width: number, height: number, clip: TimelineClip, time: number) {
   const scale = Math.max(width / sourceWidth, height / sourceHeight);
   const drawWidth = sourceWidth * scale;
   const drawHeight = sourceHeight * scale;
-  applyClipTransform(context, clip, width, height);
+  applyClipTransform(context, clip, width, height, time);
   context.drawImage(source, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
 }
 
@@ -244,11 +246,11 @@ export async function renderProjectVideo(
         context.filter = effect.filter ?? 'none';
         if (item.asset.kind === 'image') {
           const image = imageSources.get(item.asset.id);
-          if (image?.naturalWidth && image.naturalHeight) drawCover(context, image, image.naturalWidth, image.naturalHeight, canvas.width, canvas.height, item.clip);
+          if (image?.naturalWidth && image.naturalHeight) drawCover(context, image, image.naturalWidth, image.naturalHeight, canvas.width, canvas.height, item.clip, time - item.clip.start);
         } else {
           const video = playback.get(item) as HTMLVideoElement | undefined;
           if (video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth && video.videoHeight) {
-            drawCover(context, video, video.videoWidth, video.videoHeight, canvas.width, canvas.height, item.clip);
+            drawCover(context, video, video.videoWidth, video.videoHeight, canvas.width, canvas.height, item.clip, time - item.clip.start);
           }
         }
         context.restore();

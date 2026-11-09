@@ -99,6 +99,26 @@ describe('editor media and timeline flow', () => {
       const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
       expect(saved.clips?.[0].transitionIn).toBe(0.5);
     });
+
+  });
+
+  it('changes selected clip speed, adjusts timeline duration, and persists the setting', async () => {
+    const project = makeProject();
+    project.assets = [{ id: 'speed-video', name: 'speed.mp4', kind: 'video', mimeType: 'video/mp4', size: 12 }];
+    project.clips = [{ id: 'speed-clip', assetId: 'speed-video', trackId: 'video-1', start: 0, duration: 4, sourceOffset: 0 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+
+    render(<App />);
+    fireEvent.click(document.querySelector('.clip')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Effects' }));
+    const speed = await screen.findByRole('slider', { name: 'Video clip speed' });
+    expect((speed as HTMLInputElement).value).toBe('1');
+    fireEvent.change(speed, { target: { value: '2' } });
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}');
+      expect(saved.clips[0]).toMatchObject({ speed: 2, duration: 2, sourceOffset: 0 });
+    });
   });
 
   it('starts a rendered video export and reports completion', async () => {

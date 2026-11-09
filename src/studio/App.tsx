@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
-import { clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, makeProject, parseProjectDocument, type ClipKeyframe, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId } from './model';
+import { clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, makeProject, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId } from './model';
 import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
 import { audioGainAt, renderProjectVideo } from './export';
 import { authenticate, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';
@@ -153,7 +153,7 @@ export default function App() {
       return [{ clip, asset, ...trackEntry }];
     }).sort((a, b) => a.trackIndex - b.trackIndex || a.clip.start - b.clip.start);
   }, [project.assets, project.clips, project.tracks, playhead]);
-  const activeTimelineKey = activeTimelineItems.map(({ clip, track }) => `${clip.id}:${track.muted}:${track.hidden}:${clip.volume ?? 1}:${clip.transitionIn ?? 0}:${clip.transitionOut ?? 0}`).join('|');
+  const activeTimelineKey = activeTimelineItems.map(({ clip, track }) => `${clip.id}:${track.muted}:${track.hidden}:${clip.volume ?? 1}:${clip.speed ?? 1}:${clip.transitionIn ?? 0}:${clip.transitionOut ?? 0}`).join('|');
   const selectedEffects = project.effects.filter((effect) => effect.assetId === selectedAssetId);
   const selectedColorAdjustment = selectedAsset ? project.colorAdjustments[selectedAsset.id] ?? defaultColorAdjustment : defaultColorAdjustment;
   const previewEffect = selectedAsset ? effectStyle(project.effects, selectedAsset.id, selectedColorAdjustment) : { vignette: 0 };
@@ -210,13 +210,14 @@ export default function App() {
           start: Math.max(0, Math.round((clip.start + delta) * drag.fps) / drag.fps),
         };
       } else if (drag.mode === 'trim-start') {
-        const trim = Math.max(-clip.sourceOffset, Math.min(clip.duration - frame, delta));
+        const speed = clip.speed ?? 1;
+        const trim = Math.max(-clip.sourceOffset / speed, Math.min(clip.duration - frame, delta));
         const duration = clip.duration - trim;
         updated = {
           ...clip,
           start: clip.start + trim,
           duration,
-          sourceOffset: clip.sourceOffset + trim,
+          sourceOffset: clip.sourceOffset + trim * speed,
           transitionIn: Math.min(clip.transitionIn ?? 0, duration / 2) || undefined,
           transitionOut: Math.min(clip.transitionOut ?? 0, duration / 2) || undefined,
         };
@@ -291,7 +292,8 @@ export default function App() {
         continue;
       }
       const synchronize = () => {
-        const sourceTime = item.clip.sourceOffset + Math.max(0, playheadRef.current - item.clip.start);
+        const sourceTime = clipSourceTimeAt(item.clip, playheadRef.current);
+        media.playbackRate = item.clip.speed ?? 1;
         if (Number.isFinite(media.duration) && Math.abs(media.currentTime - sourceTime) > (playing ? 0.75 : 0.04)) {
           media.currentTime = Math.min(sourceTime, Number.isFinite(media.duration) ? media.duration : sourceTime);
         }
@@ -433,7 +435,7 @@ export default function App() {
     const firstDuration = playhead - clip.start;
     const secondDuration = clip.duration - firstDuration;
     const first: TimelineClip = { ...clip, duration: firstDuration, transitionIn: Math.min(clip.transitionIn ?? 0, firstDuration / 2), transitionOut: undefined };
-    const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: playhead, duration: secondDuration, sourceOffset: clip.sourceOffset + firstDuration, transitionIn: undefined, transitionOut: Math.min(clip.transitionOut ?? 0, secondDuration / 2) };
+    const second: TimelineClip = { ...clip, id: crypto.randomUUID(), start: playhead, duration: secondDuration, sourceOffset: clipSourceTimeAt(clip, playhead), transitionIn: undefined, transitionOut: Math.min(clip.transitionOut ?? 0, secondDuration / 2) };
     commit({ ...project, clips: project.clips.flatMap((item) => item.id === clip.id ? [first, second] : [item]) });
     setSelectedClipId(second.id); setPreviewMode('timeline'); setNotice('Clip split at the playhead.');
   }
@@ -451,8 +453,9 @@ export default function App() {
     const clip = project.clips.find((item) => item.id === clipId);
     const asset = clip && project.assets.find((item) => item.id === clip.assetId);
     const defaultDuration = asset?.kind === 'audio' ? 8 : 4;
-    if (clip && asset && clip.sourceOffset === 0 && Math.abs(clip.duration - defaultDuration) < 0.01 && Number.isFinite(mediaDuration) && mediaDuration > 0 && Math.abs(clip.duration - mediaDuration) > 0.25) {
-      commit({ ...project, clips: project.clips.map((item) => item.id === clip.id ? { ...item, duration: mediaDuration, transitionIn: Math.min(item.transitionIn ?? 0, mediaDuration / 2), transitionOut: Math.min(item.transitionOut ?? 0, mediaDuration / 2) } : item) });
+    const timelineDuration = clip ? (mediaDuration - clip.sourceOffset) / (clip.speed ?? 1) : 0;
+    if (clip && asset && clip.sourceOffset === 0 && Math.abs(clip.duration - defaultDuration) < 0.01 && Number.isFinite(mediaDuration) && mediaDuration > 0 && Math.abs(clip.duration - timelineDuration) > 0.25) {
+      commit({ ...project, clips: project.clips.map((item) => item.id === clip.id ? { ...item, duration: timelineDuration, transitionIn: Math.min(item.transitionIn ?? 0, timelineDuration / 2), transitionOut: Math.min(item.transitionOut ?? 0, timelineDuration / 2) } : item) });
     }
   }
   function addEffect(type: EffectId) {
@@ -474,6 +477,23 @@ export default function App() {
   }
   function removeEffect(effectId: string) {
     commit({ ...project, effects: project.effects.filter((effect) => effect.id !== effectId) });
+  }
+  function updateClipSpeed(speed: number) {
+    if (!selectedClip || !Number.isFinite(speed) || speed < MIN_CLIP_SPEED || speed > MAX_CLIP_SPEED) return;
+    const normalizedSpeed = Math.round(speed * 100) / 100;
+    const duration = clipDurationAtSpeed(selectedClip, normalizedSpeed);
+    commit({
+      ...project,
+      clips: project.clips.map((clip) => clip.id === selectedClip.id
+        ? {
+          ...clip,
+          speed: normalizedSpeed,
+          duration,
+          transitionIn: Math.min(clip.transitionIn ?? 0, duration / 2) || undefined,
+          transitionOut: Math.min(clip.transitionOut ?? 0, duration / 2) || undefined,
+        }
+        : clip),
+    });
   }
   function updateColorAdjustment(patch: Partial<ColorAdjustment>) {
     if (!selectedAsset || selectedAsset.kind === 'audio') return;
@@ -762,9 +782,16 @@ export default function App() {
             <strong>{project.assets.find((asset) => asset.id === selectedClip.assetId)?.name ?? 'Selected clip'}</strong>
             <label htmlFor="clip-volume">Volume <output>{Math.round((selectedClip.volume ?? 1) * 100)}%</output></label>
             <input id="clip-volume" aria-label="Clip volume" type="range" min="0" max="1" step="0.01" value={selectedClip.volume ?? 1} onChange={(event) => updateClipVolume(Number(event.target.value))}/>
+            <label htmlFor="audio-clip-speed">Playback speed <output>{(selectedClip.speed ?? 1).toFixed(2)}×</output></label>
+            <input id="audio-clip-speed" aria-label="Audio clip speed" type="range" min={MIN_CLIP_SPEED} max={MAX_CLIP_SPEED} step="0.05" value={selectedClip.speed ?? 1} onChange={(event) => updateClipSpeed(Number(event.target.value))}/>
+            <small>Changing audio speed also changes its pitch.</small>
           </section> : <div className="effects-empty">Select a clip on an audio track to adjust its volume.</div>}
         </div> : activeTool === 'effects' ? <div className="effects-panel">
           {selectedClip && selectedClipTrack?.kind === 'video' && project.assets.find((asset) => asset.id === selectedClip.assetId)?.kind !== 'audio' && <section className="visual-clip-control">
+            {project.assets.find((asset) => asset.id === selectedClip.assetId)?.kind === 'video' && <>
+              <header><span>CLIP SPEED</span><output>{(selectedClip.speed ?? 1).toFixed(2)}×</output></header>
+              <input aria-label="Video clip speed" type="range" min={MIN_CLIP_SPEED} max={MAX_CLIP_SPEED} step="0.05" value={selectedClip.speed ?? 1} onChange={(event) => updateClipSpeed(Number(event.target.value))}/>
+            </>}
             <header><span>CLIP TRANSFORM</span><button type="button" className="effect-remove" onClick={() => updateVisualTransform({ x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 })}>Reset</button></header>
             <div className="keyframe-toolbar"><span>{selectedClip.keyframes?.length ?? 0} keyframes</span><button type="button" aria-label={selectedKeyframe ? 'Update keyframe' : 'Add keyframe'} onClick={addVisualKeyframe}>{selectedKeyframe ? 'Update keyframe' : 'Add keyframe'} · {selectedKeyframeTime.toFixed(2)}s</button>{selectedKeyframe && <button type="button" aria-label="Remove keyframe" onClick={removeVisualKeyframe}>Remove</button>}</div>
             <div className="visual-transform-grid">

@@ -1,6 +1,6 @@
 import { getCloudMediaContent } from './api';
 import { effectStyle } from './effects';
-import { clipOpacityAt, clipTransformAt, clipVisualOpacityAt, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
+import { clipOpacityAt, clipSourceTimeAt, clipTransformAt, clipVisualOpacityAt, MAX_CLIP_SPEED, MIN_CLIP_SPEED, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
 import { readMedia } from './mediaStore';
 
 type ExportClip = {
@@ -48,7 +48,7 @@ export function createExportPlan(project: ProjectDocument): ExportPlan {
     const asset = assets.get(clip.assetId);
     const entry = tracks.get(clip.trackId);
     if (!asset || !entry) throw new Error('A timeline clip refers to missing media or a missing track.');
-    if (!Number.isFinite(clip.start) || clip.start < 0 || !Number.isFinite(clip.duration) || clip.duration <= 0 || !Number.isFinite(clip.start + clip.duration) || !Number.isFinite(clip.sourceOffset) || clip.sourceOffset < 0) {
+    if (!Number.isFinite(clip.start) || clip.start < 0 || !Number.isFinite(clip.duration) || clip.duration <= 0 || !Number.isFinite(clip.start + clip.duration) || !Number.isFinite(clip.sourceOffset) || clip.sourceOffset < 0 || !Number.isFinite(clip.speed ?? 1) || (clip.speed ?? 1) < MIN_CLIP_SPEED || (clip.speed ?? 1) > MAX_CLIP_SPEED) {
       throw new Error(`The clip "${asset.name}" has invalid timing.`);
     }
 
@@ -216,8 +216,9 @@ export async function renderProjectVideo(
     for (const [item, media] of playback) {
       media.volume = 1;
       media.muted = false;
+      media.playbackRate = item.clip.speed ?? 1;
       media.pause();
-      await waitForSeek(media, item.clip.sourceOffset);
+      await waitForSeek(media, clipSourceTimeAt(item.clip, item.clip.start));
     }
 
     const canvasStream = canvas.captureStream(plan.fps);
@@ -334,7 +335,8 @@ export async function renderProjectVideo(
         if (!activeAtTime) continue;
         nextActive.add(media);
         if (!active.has(media)) {
-          await waitForSeek(media, item.clip.sourceOffset + Math.max(0, time - item.clip.start));
+          media.playbackRate = item.clip.speed ?? 1;
+          await waitForSeek(media, clipSourceTimeAt(item.clip, time));
           try {
             await media.play();
           } catch (error) {

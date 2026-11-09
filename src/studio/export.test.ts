@@ -1,8 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { clipOpacityAt, clipTransformAt, makeProject } from './model';
+import { clipDurationAtSpeed, clipOpacityAt, clipSourceTimeAt, clipTransformAt, makeProject, parseProjectDocument } from './model';
 import { applyClipTransform, audioGainAt, audioGainFor, createExportPlan } from './export';
 
 describe('video export plan', () => {
+  it('maps timeline time to media time at clip speed and preserves source range when speed changes', () => {
+    const clip = { id: 'clip', assetId: 'video', trackId: 'video-1', start: 5, duration: 4, sourceOffset: 2, speed: 1.5 };
+    expect(clipSourceTimeAt(clip, 4)).toBe(2);
+    expect(clipSourceTimeAt(clip, 7)).toBe(5);
+    expect(clipDurationAtSpeed(clip, 3)).toBe(2);
+
+    const project = makeProject();
+    project.assets = [{ id: 'video', name: 'shot.mp4', kind: 'video', mimeType: 'video/mp4', size: 12 }];
+    project.clips = [{ ...clip, trackId: 'video-1' }];
+    expect(createExportPlan(project).video[0].clip.speed).toBe(1.5);
+    project.clips[0].speed = 4.1;
+    expect(() => parseProjectDocument(project)).toThrow('This project document is not a supported Frameforge version.');
+    expect(() => createExportPlan(project)).toThrow('has invalid timing');
+  });
+
   it('orders visible visual clips by track and includes audio tracks in duration', () => {
     const project = makeProject();
     project.assets = [

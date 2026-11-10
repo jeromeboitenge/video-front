@@ -154,6 +154,7 @@ export default function App() {
   const [cloudProjectsError, setCloudProjectsError] = useState('');
   const [openingCloudProjectId, setOpeningCloudProjectId] = useState('');
   const [deletingCloudProjectId, setDeletingCloudProjectId] = useState('');
+  const [deletingLocalProjectId, setDeletingLocalProjectId] = useState('');
   const [deletingCloudMediaId, setDeletingCloudMediaId] = useState('');
   const [savingVersion, setSavingVersion] = useState(false);
   const [restoringVersionId, setRestoringVersionId] = useState('');
@@ -991,6 +992,23 @@ export default function App() {
     try { const savedProject = localStorage.getItem(`frameforge:${id}`); if (!savedProject) throw new Error('Project draft not found on this device.'); const restored = parseProjectDocument(JSON.parse(savedProject)); setProject(restored); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(currentUser ? localStorage.getItem(cloudProjectKey(currentUser.id, id)) ?? '' : ''); setProjectMenuOpen(false); setSaved(true); }
     catch (error) { setNotice((error as Error).message); }
   }
+  function removeLocalProject(item: { id: string; name: string }) {
+    if (item.id === project.project.id || deletingLocalProjectId) return;
+    if (!window.confirm(`Delete “${item.name}” from this device? Any account copy remains in your account.`)) return;
+    setDeletingLocalProjectId(item.id);
+    try {
+      localStorage.removeItem(`frameforge:${item.id}`);
+      if (currentUser) localStorage.removeItem(cloudProjectKey(currentUser.id, item.id));
+      const next = localProjects.filter((entry) => entry.id !== item.id);
+      setLocalProjects(next);
+      localStorage.setItem('frameforge:projects-index', JSON.stringify(next));
+      setNotice(`Deleted “${item.name}” from this device. Account copies are unchanged.`);
+    } catch (error) {
+      setNotice(`Could not delete this local draft: ${(error as Error).message}`);
+    } finally {
+      setDeletingLocalProjectId('');
+    }
+  }
   async function openCloudProject(id: string) {
     setOpeningCloudProjectId(id);
     try {
@@ -1184,7 +1202,7 @@ export default function App() {
           </>}
           {localProjects.length > 0 && <>
             <div className="project-menu-label recent-label">ON THIS DEVICE</div>
-            {localProjects.slice(0, 5).map((item) => <button className={`local-project-item ${item.id === project.project.id ? 'current' : ''}`} key={item.id} onClick={() => openLocalProject(item.id)}><span>{item.name}</span><small>{new Date(item.updatedAt).toLocaleDateString()}</small></button>)}
+            {localProjects.slice(0, 5).map((item) => <div className="cloud-project-row" key={item.id}><button className={`local-project-item ${item.id === project.project.id ? 'current' : ''}`} disabled={openingCloudProjectId !== '' || deletingLocalProjectId !== ''} onClick={() => openLocalProject(item.id)}><span>{item.name}</span><small>{new Date(item.updatedAt).toLocaleDateString()}</small></button><button className="cloud-project-delete" aria-label={`Delete local draft ${item.name}`} title={item.id === project.project.id ? 'Open another project before deleting this draft' : 'Delete local draft'} disabled={item.id === project.project.id || deletingLocalProjectId !== '' || openingCloudProjectId !== ''} onClick={() => removeLocalProject(item)}><Trash2 size={13}/></button></div>)}
           </>}
           {currentUser && <>
             <div className="project-menu-label recent-label">IN YOUR ACCOUNT</div>

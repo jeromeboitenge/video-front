@@ -120,6 +120,34 @@ function formatVttTimestamp(seconds: number): string {
   return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}.${fraction.toString().padStart(3, '0')}`;
 }
 
+function formatSubRipTimestamp(seconds: number): string {
+  const milliseconds = Math.round(seconds * 1000);
+  const hours = Math.floor(milliseconds / 3_600_000);
+  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000);
+  const remainingSeconds = Math.floor((milliseconds % 60_000) / 1000);
+  const fraction = milliseconds % 1000;
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')},${fraction.toString().padStart(3, '0')}`;
+}
+
+export function serializeSubRip(overlays: readonly TextOverlay[]): string {
+  const captions = overlays
+    .filter((overlay) => overlay.kind === 'caption')
+    .map((overlay) => {
+      if (!Number.isFinite(overlay.start) || overlay.start < 0 || !Number.isFinite(overlay.duration) || overlay.duration <= 0 || !overlay.text.trim()) {
+        throw new Error(`Caption "${overlay.text.slice(0, 40)}" has an invalid time range or no text.`);
+      }
+      return overlay;
+    })
+    .sort((a, b) => a.start - b.start);
+  if (!captions.length) throw new Error('There are no captions to export.');
+
+  return `${captions.map((caption, index) => {
+    const start = formatSubRipTimestamp(caption.start);
+    const end = formatSubRipTimestamp(caption.start + caption.duration);
+    return `${index + 1}\r\n${start} --> ${end}\r\n${caption.text}`;
+  }).join('\r\n\r\n')}\r\n`;
+}
+
 export function serializeWebVtt(overlays: readonly TextOverlay[]): string {
   const captions = overlays
     .filter((overlay) => overlay.kind === 'caption')

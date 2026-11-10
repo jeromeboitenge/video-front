@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Captions, FileUp, Plus, Sparkles, Trash2 } from 'lucide-react';
 import type { TextOverlay, TimelineClip, ToolId } from './model';
-import { parseSubRip, parseWebVtt, serializeWebVtt } from './subtitles';
+import { parseSubRip, parseWebVtt, serializeSubRip, serializeWebVtt } from './subtitles';
 
 type CreativeTool = Extract<ToolId, 'text' | 'captions' | 'transitions' | 'ai'>;
 
@@ -97,13 +97,14 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
     }
   }
 
-  function exportSubtitles() {
+  function exportSubtitles(format: 'srt' | 'vtt') {
     try {
-      const contents = serializeWebVtt(shownOverlays);
-      const url = URL.createObjectURL(new Blob([contents], { type: 'text/vtt;charset=utf-8' }));
+      const contents = format === 'srt' ? serializeSubRip(shownOverlays) : serializeWebVtt(shownOverlays);
+      const mimeType = format === 'srt' ? 'application/x-subrip;charset=utf-8' : 'text/vtt;charset=utf-8';
+      const url = URL.createObjectURL(new Blob([contents], { type: mimeType }));
       const link = document.createElement('a');
       link.href = url;
-      link.download = 'captions.vtt';
+      link.download = `captions.${format}`;
       link.click();
       URL.revokeObjectURL(url);
     } catch (error) {
@@ -146,7 +147,7 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
     {isCaption && <div className="subtitle-import">
       <input ref={fileInput} type="file" accept=".srt,.vtt,application/x-subrip,text/vtt,text/plain" hidden onChange={(event) => void importSubtitles(event.target.files?.[0])}/>
       <button className="creative-secondary" onClick={() => fileInput.current?.click()}><FileUp size={14}/>Import .srt or .vtt</button>
-      {shownOverlays.length > 0 && <button className="creative-secondary" onClick={exportSubtitles}>Export .vtt</button>}
+      {shownOverlays.length > 0 && <><button className="creative-secondary" onClick={() => exportSubtitles('srt')}>Export .srt</button><button className="creative-secondary" onClick={() => exportSubtitles('vtt')}>Export .vtt</button></>}
       {fileError && <p className="creative-error" role="alert">{fileError}</p>}
     </div>}
     <form className="creative-form" onSubmit={addText}>

@@ -10,11 +10,13 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
     const body = await response.json().catch(() => null) as { detail?: string } | null;
     throw new Error(body?.detail ?? `Request failed (${response.status})`);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
 export type Session = { access_token: string; token_type: string; user: { id: string; email: string; is_admin: boolean } };
 export type CloudProject = { id: string; name: string; document: unknown; created_at: string; updated_at: string };
+export type CloudProjectVersion = { id: string; project_id: string; version_number: number; name: string; created_at: string };
 export type CloudMedia = { id: string; name: string; mime_type: string; size: number; created_at: string };
 export type Organization = { id: string; name: string; slug: string; description: string | null; created_by: string; created_at: string };
 export type OrganizationRequest = { id: string; name: string; slug: string; description: string | null; requested_by: string; requester_email?: string | null; status: 'pending' | 'approved' | 'rejected'; reviewed_by: string | null; review_note: string | null; created_at: string; reviewed_at: string | null };
@@ -112,6 +114,22 @@ export async function listCloudProjects() {
 
 export async function getCloudProject(id: string) {
   return apiRequest<CloudProject>(`/projects/${encodeURIComponent(id)}`);
+}
+
+export async function deleteCloudProject(id: string) {
+  return apiRequest<void>(`/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function listCloudProjectVersions(projectId: string) {
+  return apiRequest<CloudProjectVersion[]>(`/projects/${encodeURIComponent(projectId)}/versions`);
+}
+
+export async function createCloudProjectVersion(projectId: string) {
+  return apiRequest<CloudProjectVersion>(`/projects/${encodeURIComponent(projectId)}/versions`, { method: 'POST' });
+}
+
+export async function restoreCloudProjectVersion(projectId: string, versionId: string) {
+  return apiRequest<CloudProject>(`/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/restore`, { method: 'POST' });
 }
 
 export async function uploadCloudMedia(file: File) {

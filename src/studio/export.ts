@@ -112,6 +112,8 @@ export async function renderEditedImage(asset: MediaAsset, project: ProjectDocum
   if (asset.kind !== 'image') throw new Error('PNG export is only available for image assets.');
   if (typeof createImageBitmap !== 'function') throw new Error('This browser does not support image export. Use a current version of Chrome, Edge, or Firefox.');
 
+  if (project.imageLayers.length) return renderImageComposition(project);
+
   const bitmap = await createImageBitmap(await loadAsset(asset, new AbortController().signal));
   try {
     if (!bitmap.width || !bitmap.height) throw new Error(`Could not decode "${asset.name}" for export.`);
@@ -127,6 +129,56 @@ export async function renderEditedImage(asset: MediaAsset, project: ProjectDocum
   } finally {
     bitmap.close();
   }
+}
+
+async function renderImageComposition(project: ProjectDocument): Promise<Blob> {
+  const canvas = document.createElement('canvas');
+  canvas.width = project.canvas.width;
+  canvas.height = project.canvas.height;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Could not initialize the image composition canvas.');
+  const assets = new Map(project.assets.map((asset) => [asset.id, asset]));
+  for (const layer of project.imageLayers) {
+    if (!layer.visible) continue;
+    const asset = assets.get(layer.assetId);
+    if (!asset) continue;
+    const bitmap = await createImageBitmap(await loadAsset(asset, new AbortController().signal));
+    try {
+      const ratio = Math.min(canvas.width / bitmap.width, canvas.height / bitmap.height);
+      const width = bitmap.width * ratio;
+      const height = bitmap.height * ratio;
+      const effect = effectStyle(project.effects, asset.id, project.colorAdjustments[asset.id]);
+      context.save();
+      context.globalAlpha = layer.opacity;
+      context.globalCompositeOperation = layer.blendMode === 'normal' ? 'source-over' : layer.blendMode;
+      context.filter = effect.filter ?? 'none';
+      context.translate(canvas.width / 2 + layer.x * canvas.width / 100, canvas.height / 2 + layer.y * canvas.height / 100);
+      context.rotate(layer.rotation * Math.PI / 180);
+      context.scale(layer.scale, layer.scale);
+      context.beginPath();
+      context.rect(
+        canvas.width * (layer.cropLeft ?? 0),
+        canvas.height * (layer.cropTop ?? 0),
+        canvas.width * (1 - (layer.cropLeft ?? 0) - (layer.cropRight ?? 0)),
+        canvas.height * (1 - (layer.cropTop ?? 0) - (layer.cropBottom ?? 0)),
+      );
+      context.clip();
+      context.drawImage(bitmap, -width / 2, -height / 2, width, height);
+      context.restore();
+      if (effect.vignette > 0) {
+        const gradient = context.createRadialGradient(canvas.width / 2, canvas.height / 2, canvas.height * 0.16, canvas.width / 2, canvas.height / 2, canvas.height * 0.72);
+        gradient.addColorStop(0, 'rgba(0,0,0,0)');
+        gradient.addColorStop(1, `rgba(0,0,0,${effect.vignette * 0.78})`);
+        context.fillStyle = gradient;
+        context.fillRect(0, 0, canvas.width, canvas.height);
+      }
+    } finally {
+      bitmap.close();
+    }
+  }
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('The browser could not encode the image composition as PNG.')), 'image/png');
+  });
 }
 
 function waitForMedia(media: HTMLMediaElement, assetName: string): Promise<void> {

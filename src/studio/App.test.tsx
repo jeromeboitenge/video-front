@@ -21,6 +21,50 @@ vi.mock('./waveform', async (importOriginal) => ({
 }));
 
 describe('editor media and timeline flow', () => {
+  it('duplicates the editable project document into a separate local draft', async () => {
+    const project = makeProject();
+    project.project.name = 'Beach edit';
+    project.assets = [{ id: 'asset-1', name: 'scene.png', kind: 'image', mimeType: 'image/png', size: 12 }];
+    project.clips = [{ id: 'clip-1', assetId: 'asset-1', trackId: 'video-1', start: 0, duration: 2, sourceOffset: 0 }];
+    localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Beach edit/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Duplicate project' }));
+
+    await waitFor(() => {
+      const duplicateId = JSON.parse(localStorage.getItem('frameforge:last-project') ?? '{}').project.id;
+      expect(duplicateId).not.toBe(project.project.id);
+      expect(JSON.parse(localStorage.getItem(`frameforge:${duplicateId}`) ?? '{}')).toMatchObject({
+        project: { id: duplicateId, name: 'Beach edit copy' },
+        assets: [{ id: 'asset-1', name: 'scene.png' }],
+        clips: [{ id: 'clip-1', assetId: 'asset-1' }],
+      });
+    });
+  });
+
+  it('builds an editable image layer and previews visibility changes', async () => {
+    render(<App />);
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    fireEvent.change(fileInput, { target: { files: [new File(['image'], 'poster.png', { type: 'image/png' })] } });
+    await waitFor(() => expect(document.querySelector('.asset-row strong')?.textContent).toBe('poster.png'));
+    fireEvent.click(screen.getByRole('button', { name: 'Image Studio' }));
+
+    expect(screen.getByText('Layers · 1')).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'poster.png' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide poster.png' }));
+    expect(screen.queryByRole('img', { name: 'poster.png' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show poster.png' }));
+    expect(screen.getByRole('img', { name: 'poster.png' })).toBeTruthy();
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Layer X' }), { target: { value: '12' } });
+    expect((screen.getByRole('img', { name: 'poster.png' }) as HTMLImageElement).style.transform).toContain('translate(12%, 0%)');
+    fireEvent.click(screen.getByTitle('Undo · Ctrl Z'));
+    expect((screen.getByRole('spinbutton', { name: 'Layer X' }) as HTMLInputElement).value).toBe('0');
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Crop left' }), { target: { value: '15' } });
+    expect((screen.getByRole('img', { name: 'poster.png' }) as HTMLImageElement).style.clipPath).toBe('inset(0% 0% 0% 15%)');
+    expect((screen.getByRole('spinbutton', { name: 'Crop left' }) as HTMLInputElement).value).toBe('15');
+  });
+
   it('loads project documents created before effects were introduced', () => {
     const { effects: _effects, ...legacyDocument } = makeProject();
     const { textOverlays: _textOverlays, ...olderDocument } = legacyDocument;
@@ -648,7 +692,8 @@ describe('editor media and timeline flow', () => {
         canvas: { width: 1080, height: 1920, fps: 30, background: '#151619' },
         tracks: [],
         clips: [],
-        assets: [],
+        assets: [{ id: 'cloud-image', name: 'cloud-poster.png', kind: 'image', mimeType: 'image/png', size: 10, cloudId: 'media-1' }],
+        imageLayers: [{ id: 'cloud-layer', assetId: 'cloud-image', name: 'Cloud poster layer', visible: true, locked: false, opacity: 0.7, blendMode: 'screen', x: 5, y: -2, scale: 1.1, rotation: 4, cropLeft: 0.1, cropTop: 0, cropRight: 0, cropBottom: 0 }],
         settings: {},
       },
       created_at: '2026-01-01T00:00:00Z',
@@ -670,6 +715,76 @@ describe('editor media and timeline flow', () => {
     expect(projectRequest).toBeDefined();
     expect(new Headers(projectRequest?.[1]?.headers).get('Authorization')).toBe('Bearer test-token');
     expect(screen.getByText(/Cloud media restores when selected/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Image Studio' }));
+    expect(screen.getByText('Cloud poster layer', { selector: 'strong' })).toBeTruthy();
+    expect(screen.getByRole('spinbutton', { name: 'Crop left' })).toHaveProperty('value', '10');
+  });
+
+  it('deletes an account project through the API and updates the project list', async () => {
+    sessionStorage.setItem('frameforge:access-token', 'test-token');
+    sessionStorage.setItem('frameforge:user', JSON.stringify({ id: 'user-1', email: 'creator@example.com' }));
+    const remoteProject = {
+      id: 'cloud-project-delete', name: 'Old campaign',
+      document: { version: 1, project: { id: 'local-old', name: 'Old campaign' }, canvas: { width: 540, height: 960, fps: 30, background: '#151619' }, tracks: [], clips: [], assets: [], settings: {} },
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/auth/me')) return { ok: true, status: 200, json: async () => ({ id: 'user-1', email: 'creator@example.com', is_admin: false }) } as Response;
+      if (init?.method === 'DELETE') return { ok: true, status: 204, json: vi.fn() } as unknown as Response;
+      return { ok: true, status: 200, json: async () => [remoteProject] } as Response;
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Untitled story' }));
+    const deleteButton = await screen.findByRole('button', { name: 'Delete account project Old campaign' });
+    fireEvent.click(deleteButton);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('http://localhost:8000/api/v1/projects/cloud-project-delete', expect.objectContaining({ method: 'DELETE' })));
+    expect(await screen.findByText('No account projects yet.')).toBeTruthy();
+    expect(document.querySelector('.toast')?.textContent).toContain('Deleted “Old campaign” from your account');
+  });
+
+  it('saves and restores cloud project versions through the API', async () => {
+    sessionStorage.setItem('frameforge:access-token', 'test-token');
+    sessionStorage.setItem('frameforge:user', JSON.stringify({ id: 'user-versions', email: 'creator@example.com' }));
+    const draft = makeProject();
+    draft.project = { id: 'local-versioned', name: 'Versioned design' };
+    localStorage.setItem('frameforge:last-project', JSON.stringify(draft));
+    localStorage.setItem('frameforge:cloud-project:user-versions:local-versioned', 'cloud-versioned');
+    const versionOne = { id: 'version-1', project_id: 'cloud-versioned', version_number: 1, name: 'Versioned design', created_at: '2026-01-01T00:00:00Z' };
+    const versionTwo = { ...versionOne, id: 'version-2', version_number: 2, created_at: '2026-01-02T00:00:00Z' };
+    const restoredDocument = {
+      ...draft,
+      project: { id: 'local-versioned', name: 'Snapshot design' },
+      assets: [{ id: 'snapshot-image', name: 'snapshot.png', kind: 'image', mimeType: 'image/png', size: 1, cloudId: 'snapshot-media' }],
+      imageLayers: [{ id: 'snapshot-layer', assetId: 'snapshot-image', name: 'Snapshot layer', visible: true, locked: false, opacity: 1, blendMode: 'normal', x: 0, y: 0, scale: 1, rotation: 0, cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }],
+    };
+    const restoredProject = { id: 'cloud-versioned', name: 'Snapshot design', document: restoredDocument, created_at: versionOne.created_at, updated_at: versionTwo.created_at };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/auth/me')) return { ok: true, status: 200, json: async () => ({ id: 'user-versions', email: 'creator@example.com', is_admin: false }) } as Response;
+      if (url.endsWith('/versions') && init?.method === 'POST') return { ok: true, status: 201, json: async () => versionTwo } as Response;
+      if (url.endsWith('/versions') && init?.method !== 'POST') return { ok: true, status: 200, json: async () => [versionOne] } as Response;
+      if (url.endsWith('/restore')) return { ok: true, status: 200, json: async () => restoredProject } as Response;
+      if (init?.method === 'PUT') return { ok: true, status: 200, json: async () => restoredProject } as Response;
+      if (url.endsWith('/projects')) return { ok: true, status: 200, json: async () => [restoredProject] } as Response;
+      return { ok: true, status: 200, json: async () => restoredProject } as Response;
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Versioned design' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Save version' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('http://localhost:8000/api/v1/projects/cloud-versioned/versions', expect.objectContaining({ method: 'POST' })));
+    expect(document.querySelector('.toast')?.textContent).toContain('Saved version 2');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore version 1' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Snapshot design' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Image Studio' }));
+    expect(screen.getByText('Snapshot layer', { selector: 'strong' })).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/versions/version-1/restore'))).toBe(true);
   });
 
   it('uploads imported media for signed-in users and saves the cloud media reference', async () => {

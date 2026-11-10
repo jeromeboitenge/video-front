@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
-import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Film, FolderOpen, Frame, Gauge, Image, Layers3, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Pencil, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
-import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
+import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Eye, EyeOff, Film, FolderOpen, Frame, Gauge, Image, Layers3, Lock, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Pencil, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Unlock, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
+import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type ImageLayer, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
 import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
 import { audioGainAt, renderEditedImage, renderProjectVideo } from './export';
-import { authenticate, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjects, saveCloudProject, uploadCloudMedia, type CloudProject } from './api';
+import { authenticate, createCloudProjectVersion, deleteCloudProject, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjectVersions, listCloudProjects, restoreCloudProjectVersion, saveCloudProject, uploadCloudMedia, type CloudProject, type CloudProjectVersion } from './api';
 import { readMedia, storeMedia } from './mediaStore';
 import { decodeAudioWaveform, waveformPeaksForClip, type AudioWaveform } from './waveform';
 import { CreativeToolsPanel } from './CreativeToolsPanel';
@@ -11,7 +11,7 @@ import { AdminPanel, OrganizationRequestForm, SupportTicketForm } from './AdminP
 import './export.css';
 
 const tools: { id: ToolId; label: string; icon: typeof Film }[] = [
-  { id: 'media', label: 'Media', icon: Film }, { id: 'audio', label: 'Audio', icon: AudioLines }, { id: 'text', label: 'Text', icon: Type },
+  { id: 'media', label: 'Media', icon: Film }, { id: 'image', label: 'Image Studio', icon: Image }, { id: 'audio', label: 'Audio', icon: AudioLines }, { id: 'text', label: 'Text', icon: Type },
   { id: 'captions', label: 'Captions', icon: Captions }, { id: 'elements', label: 'Elements', icon: Shapes }, { id: 'effects', label: 'Effects', icon: Sparkles },
   { id: 'transitions', label: 'Transitions', icon: Layers3 }, { id: 'ai', label: 'AI studio', icon: WandSparkles },
 ];
@@ -38,6 +38,18 @@ type TimelineDrag = {
   secondsPerPixel: number;
   fps: number;
   originalClip: TimelineClip;
+  originalProject: ProjectDocument;
+  changed: boolean;
+};
+
+type ImageLayerDrag = {
+  layerId: string;
+  startX: number;
+  startY: number;
+  width: number;
+  height: number;
+  originalX: number;
+  originalY: number;
   originalProject: ProjectDocument;
   changed: boolean;
 };
@@ -107,6 +119,7 @@ export default function App() {
   const [loadingAssetId, setLoadingAssetId] = useState<string | null>(null);
   const [importingMedia, setImportingMedia] = useState(false);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [selectedImageLayerId, setSelectedImageLayerId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [trackManagerOpen, setTrackManagerOpen] = useState(false);
   const [trackNames, setTrackNames] = useState<Record<string, string>>({});
@@ -128,9 +141,15 @@ export default function App() {
     try { const user = JSON.parse(sessionStorage.getItem('frameforge:user') ?? 'null') as { id?: string } | null; return user?.id ? localStorage.getItem(cloudProjectKey(user.id, project.project.id)) ?? '' : ''; } catch { return ''; }
   });
   const [cloudProjects, setCloudProjects] = useState<CloudProject[]>([]);
+  const [cloudVersions, setCloudVersions] = useState<CloudProjectVersion[]>([]);
+  const [cloudVersionsLoading, setCloudVersionsLoading] = useState(false);
+  const [cloudVersionsError, setCloudVersionsError] = useState('');
   const [cloudProjectsLoading, setCloudProjectsLoading] = useState(false);
   const [cloudProjectsError, setCloudProjectsError] = useState('');
   const [openingCloudProjectId, setOpeningCloudProjectId] = useState('');
+  const [deletingCloudProjectId, setDeletingCloudProjectId] = useState('');
+  const [savingVersion, setSavingVersion] = useState(false);
+  const [restoringVersionId, setRestoringVersionId] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
   const [exportOpen, setExportOpen] = useState(false);
@@ -146,6 +165,7 @@ export default function App() {
   const undoStack = useRef<ProjectDocument[]>([]);
   const redoStack = useRef<ProjectDocument[]>([]);
   const timelineDrag = useRef<TimelineDrag | null>(null);
+  const imageLayerDrag = useRef<ImageLayerDrag | null>(null);
   const exportAbort = useRef<AbortController | null>(null);
   const [saved, setSaved] = useState(true);
   const lastClipEnd = Math.max(
@@ -154,6 +174,7 @@ export default function App() {
   );
   const duration = Math.max(24, Math.ceil(lastClipEnd / 12) * 12);
   const selectedAsset = project.assets.find((asset) => asset.id === selectedAssetId);
+  const selectedImageLayer = project.imageLayers.find((layer) => layer.id === selectedImageLayerId);
   const selectedClip = project.clips.find((clip) => clip.id === selectedClipId);
   const selectedClipTrack = project.tracks.find((track) => track.id === selectedClip?.trackId);
   const selectedClipLocalTime = selectedClip ? Math.max(0, Math.min(selectedClip.duration, playhead - selectedClip.start)) : 0;
@@ -356,7 +377,7 @@ export default function App() {
 
   useEffect(() => {
     const clippedAssetIds = new Set(project.clips.map((clip) => clip.assetId));
-    const neededAssets = project.assets.filter((asset) => asset.id === selectedAssetId || clippedAssetIds.has(asset.id))
+    const neededAssets = project.assets.filter((asset) => asset.id === selectedAssetId || clippedAssetIds.has(asset.id) || (activeTool === 'image' && project.imageLayers.some((layer) => layer.assetId === asset.id)))
       .filter((asset) => !mediaUrlMap.current[asset.id]);
     if (!neededAssets.length) {
       setLoadingAssetId(null);
@@ -391,7 +412,7 @@ export default function App() {
       if (active && selectedIsLoading) setLoadingAssetId(null);
     });
     return () => { active = false; };
-  }, [selectedAssetId, project.assets, project.clips]);
+  }, [selectedAssetId, project.assets, project.clips, project.imageLayers, activeTool]);
 
   useEffect(() => () => { Object.values(mediaUrlMap.current).forEach(URL.revokeObjectURL); }, []);
 
@@ -450,6 +471,24 @@ export default function App() {
   }, [projectMenuOpen, currentUser]);
 
   useEffect(() => {
+    if (!projectMenuOpen || !currentUser || !cloudProjectId) {
+      setCloudVersions([]);
+      setCloudVersionsError('');
+      setCloudVersionsLoading(false);
+      return;
+    }
+    let active = true;
+    setCloudVersionsLoading(true);
+    setCloudVersionsError('');
+    void listCloudProjectVersions(cloudProjectId).then((versions) => {
+      if (active) setCloudVersions(versions);
+    }).catch((error: Error) => {
+      if (active) setCloudVersionsError(error.message);
+    }).finally(() => { if (active) setCloudVersionsLoading(false); });
+    return () => { active = false; };
+  }, [projectMenuOpen, currentUser, cloudProjectId]);
+
+  useEffect(() => {
     if (adminPanelOpen) return;
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); }
@@ -467,6 +506,68 @@ export default function App() {
   function redo() { const next = redoStack.current.pop(); if (next) { undoStack.current.push(project); setProject(next); setSaved(false); } }
   function toggleSafeMargins() {
     commit({ ...project, settings: { ...project.settings, safeMargins: !safeMarginsEnabled } });
+  }
+  function updateImageLayer(layerId: string, patch: Partial<ImageLayer>) {
+    commit({ ...project, imageLayers: project.imageLayers.map((layer) => layer.id === layerId ? { ...layer, ...patch } : layer) });
+  }
+  function updateLayerCrop(layerId: string, edge: 'cropLeft' | 'cropTop' | 'cropRight' | 'cropBottom', percentage: number) {
+    const layer = project.imageLayers.find((item) => item.id === layerId);
+    if (!layer || layer.locked) return;
+    const opposite: Record<typeof edge, typeof edge> = { cropLeft: 'cropRight', cropRight: 'cropLeft', cropTop: 'cropBottom', cropBottom: 'cropTop' };
+    const maximum = Math.max(0, 95 - layer[opposite[edge]] * 100);
+    updateImageLayer(layerId, { [edge]: Math.min(maximum, Math.max(0, percentage)) / 100 });
+  }
+  function reorderImageLayer(layerId: string, direction: -1 | 1) {
+    const index = project.imageLayers.findIndex((layer) => layer.id === layerId);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= project.imageLayers.length) return;
+    const imageLayers = [...project.imageLayers];
+    [imageLayers[index], imageLayers[target]] = [imageLayers[target], imageLayers[index]];
+    commit({ ...project, imageLayers });
+  }
+  function duplicateImageLayer(layerId: string) {
+    const layer = project.imageLayers.find((item) => item.id === layerId);
+    if (!layer) return;
+    const duplicate = { ...layer, id: crypto.randomUUID(), name: `${layer.name} copy`, x: layer.x + 2, y: layer.y + 2 };
+    const index = project.imageLayers.findIndex((item) => item.id === layerId);
+    commit({ ...project, imageLayers: [...project.imageLayers.slice(0, index + 1), duplicate, ...project.imageLayers.slice(index + 1)] });
+    setSelectedImageLayerId(duplicate.id);
+  }
+  function deleteImageLayer(layerId: string) {
+    commit({ ...project, imageLayers: project.imageLayers.filter((layer) => layer.id !== layerId) });
+    if (selectedImageLayerId === layerId) setSelectedImageLayerId(null);
+  }
+  function beginImageLayerDrag(event: ReactPointerEvent<HTMLImageElement>, layer: ImageLayer) {
+    if (layer.locked) return;
+    event.preventDefault();
+    const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setSelectedImageLayerId(layer.id);
+    setSelectedAssetId(layer.assetId);
+    imageLayerDrag.current = {
+      layerId: layer.id, startX: event.clientX, startY: event.clientY, width: bounds.width, height: bounds.height,
+      originalX: layer.x, originalY: layer.y, originalProject: project, changed: false,
+    };
+  }
+  function moveImageLayer(event: ReactPointerEvent<HTMLImageElement>) {
+    const drag = imageLayerDrag.current;
+    if (!drag) return;
+    event.preventDefault();
+    const x = drag.originalX + (event.clientX - drag.startX) / drag.width * 100;
+    const y = drag.originalY + (event.clientY - drag.startY) / drag.height * 100;
+    drag.changed ||= Math.abs(x - drag.originalX) > 0.01 || Math.abs(y - drag.originalY) > 0.01;
+    setProject({ ...drag.originalProject, imageLayers: drag.originalProject.imageLayers.map((layer) => layer.id === drag.layerId ? { ...layer, x, y } : layer) });
+    setSaved(false);
+  }
+  function finishImageLayerDrag() {
+    const drag = imageLayerDrag.current;
+    if (!drag) return;
+    imageLayerDrag.current = null;
+    if (drag.changed) {
+      undoStack.current.push(drag.originalProject);
+      redoStack.current = [];
+    }
   }
   function addTrack(kind: 'video' | 'audio') {
     const label = kind === 'video' ? 'Video' : 'Audio';
@@ -743,7 +844,12 @@ export default function App() {
     mediaUrlMap.current = { ...mediaUrlMap.current, ...urls };
     setMediaUrls({ ...mediaUrlMap.current });
     setSelectedAssetId(additions[0].id);
-    commit({ ...project, assets: [...project.assets, ...additions], clips });
+    const newImageLayers: ImageLayer[] = additions.filter((asset) => asset.kind === 'image').map((asset) => ({
+      id: crypto.randomUUID(), assetId: asset.id, name: asset.name, visible: true, locked: false, opacity: 1,
+      blendMode: 'normal', x: 0, y: 0, scale: 1, rotation: 0, cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0,
+    }));
+    commit({ ...project, assets: [...project.assets, ...additions], clips, imageLayers: [...project.imageLayers, ...newImageLayers] });
+    if (newImageLayers.length) setSelectedImageLayerId(newImageLayers[newImageLayers.length - 1].id);
     setNotice(uploadErrors.length
       ? `${additions.length} media item${additions.length === 1 ? '' : 's'} added locally. Cloud upload failed for ${uploadErrors.join('; ')}.`
       : sessionStorage.getItem('frameforge:access-token')
@@ -782,6 +888,33 @@ export default function App() {
     localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
     setProject(makeProject()); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(''); setProjectMenuOpen(false); setSaved(false);
   }
+  async function duplicateCurrentProject() {
+    const duplicate = structuredClone(project);
+    duplicate.project = { id: crypto.randomUUID(), name: `${project.project.name} copy` };
+    localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
+    localStorage.setItem(`frameforge:${duplicate.project.id}`, JSON.stringify(duplicate));
+    setProject(duplicate);
+    setSelectedAssetId(null);
+    setSelectedClipId(null);
+    setPlaying(false);
+    setPlayhead(0);
+    setPreviewMode(duplicate.clips.length ? 'timeline' : 'asset');
+    setCloudProjectId('');
+    setProjectMenuOpen(false);
+    setSaved(true);
+    if (currentUser && sessionStorage.getItem('frameforge:access-token')) {
+      try {
+        const savedProject = await saveCloudProject(duplicate.project.name, duplicate);
+        setCloudProjectId(savedProject.id);
+        localStorage.setItem(cloudProjectKey(currentUser.id, duplicate.project.id), savedProject.id);
+        setNotice(`Created a copy of “${project.project.name}” and synced it to your account.`);
+      } catch (error) {
+        setNotice(`Project copy is saved on this device. Cloud sync failed: ${(error as Error).message}`);
+      }
+    } else {
+      setNotice(`Created “${duplicate.project.name}” on this device. Media files remain shared with the original project.`);
+    }
+  }
   function openLocalProject(id: string) {
     try { const savedProject = localStorage.getItem(`frameforge:${id}`); if (!savedProject) throw new Error('Project draft not found on this device.'); const restored = parseProjectDocument(JSON.parse(savedProject)); setProject(restored); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(currentUser ? localStorage.getItem(cloudProjectKey(currentUser.id, id)) ?? '' : ''); setProjectMenuOpen(false); setSaved(true); }
     catch (error) { setNotice((error as Error).message); }
@@ -807,6 +940,71 @@ export default function App() {
       setNotice(`Could not open account project: ${(error as Error).message}`);
     } finally {
       setOpeningCloudProjectId('');
+    }
+  }
+  async function removeCloudProject(item: CloudProject) {
+    const localCopyRemains = localStorage.getItem(`frameforge:${project.project.id}`) !== null;
+    const activeProject = cloudProjectId === item.id;
+    const detail = activeProject && !localCopyRemains
+      ? `Delete “${item.name}” from your account? The current editor draft will remain open on this device but will no longer sync.`
+      : `Delete “${item.name}” from your account? Any local draft on this device remains available.`;
+    if (!window.confirm(detail)) return;
+    setDeletingCloudProjectId(item.id);
+    setCloudProjectsError('');
+    try {
+      await deleteCloudProject(item.id);
+      setCloudProjects((items) => items.filter((projectItem) => projectItem.id !== item.id));
+      if (activeProject) {
+        setCloudProjectId('');
+        if (currentUser) localStorage.removeItem(cloudProjectKey(currentUser.id, project.project.id));
+      }
+      setNotice(`Deleted “${item.name}” from your account. The local device draft remains.`);
+    } catch (error) {
+      setCloudProjectsError(`Could not delete project: ${(error as Error).message}`);
+    } finally {
+      setDeletingCloudProjectId('');
+    }
+  }
+  async function saveProjectVersion() {
+    if (!cloudProjectId || !currentUser || !sessionStorage.getItem('frameforge:access-token')) {
+      setNotice('Sign in and save this project to your account before creating a version.');
+      return;
+    }
+    setSavingVersion(true);
+    try {
+      await saveCloudProject(project.project.name, project, cloudProjectId);
+      const version = await createCloudProjectVersion(cloudProjectId);
+      setCloudVersions((versions) => [version, ...versions.filter((item) => item.id !== version.id)]);
+      setNotice(`Saved version ${version.version_number} to your account.`);
+    } catch (error) {
+      setNotice(`Could not save project version: ${(error as Error).message}`);
+    } finally {
+      setSavingVersion(false);
+    }
+  }
+  async function restoreProjectVersion(version: CloudProjectVersion) {
+    if (!cloudProjectId || !window.confirm(`Restore version ${version.version_number} of “${version.name}”? Current edits are saved locally first.`)) return;
+    setRestoringVersionId(version.id);
+    try {
+      localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
+      localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+      const restored = await restoreCloudProjectVersion(cloudProjectId, version.id);
+      const document = parseProjectDocument(restored.document);
+      setProject(document);
+      setSelectedAssetId(null);
+      setSelectedClipId(null);
+      setSelectedImageLayerId(null);
+      setPreviewMode(document.clips.length ? 'timeline' : 'asset');
+      setPlayhead(0);
+      setCloudProjects((items) => items.map((item) => item.id === restored.id ? restored : item));
+      localStorage.setItem(`frameforge:${document.project.id}`, JSON.stringify(document));
+      if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, document.project.id), restored.id);
+      setNotice(`Restored version ${version.version_number}.`);
+      setProjectMenuOpen(false);
+    } catch (error) {
+      setNotice(`Could not restore project version: ${(error as Error).message}`);
+    } finally {
+      setRestoringVersionId('');
     }
   }
   function renameProject() {
@@ -866,7 +1064,7 @@ export default function App() {
     }
   }
 
-  const toolTitle: Record<ToolId, string> = { media: 'Project media', audio: 'Audio library', text: 'Typography', captions: 'Captions', elements: 'Elements', effects: 'Effects', transitions: 'Transitions', ai: 'AI studio' };
+  const toolTitle: Record<ToolId, string> = { media: 'Project media', image: 'Image layers', audio: 'Audio library', text: 'Typography', captions: 'Captions', elements: 'Elements', effects: 'Effects', transitions: 'Transitions', ai: 'AI studio' };
 
   if (adminPanelOpen && currentUser?.is_admin) return <AdminPanel email={currentUser.email} onBack={() => setAdminPanelOpen(false)} onSignOut={signOut}/>;
 
@@ -878,14 +1076,20 @@ export default function App() {
         {projectMenuOpen && <div className="project-menu">
           <div className="project-menu-label">CURRENT PROJECT</div>
           <button className="project-menu-action" onClick={renameProject}>Rename project</button>
+          <button className="project-menu-action" onClick={() => void duplicateCurrentProject()}><Copy size={13}/>Duplicate project</button>
           <button className="project-menu-action" onClick={startNewProject}><Plus size={13}/>New project</button>
+          {currentUser && cloudProjectId && <>
+            <button className="project-menu-action" disabled={savingVersion || restoringVersionId !== ''} onClick={() => void saveProjectVersion()}><Copy size={13}/>{savingVersion ? 'Saving version…' : 'Save version'}</button>
+            <div className="project-menu-label recent-label">VERSION HISTORY</div>
+            {cloudVersionsLoading ? <div className="cloud-project-message">Loading versions…</div> : cloudVersionsError ? <div className="cloud-project-message error" role="alert">{cloudVersionsError}</div> : cloudVersions.length ? cloudVersions.map((version) => <div className="project-version-row" key={version.id}><span><strong>v{version.version_number} · {version.name}</strong><small>{new Date(version.created_at).toLocaleString()}</small></span><button className="cloud-project-delete" aria-label={`Restore version ${version.version_number}`} disabled={restoringVersionId !== '' || savingVersion} onClick={() => void restoreProjectVersion(version)}>{restoringVersionId === version.id ? '…' : '↶'}</button></div>) : <div className="cloud-project-message">No saved versions yet.</div>}
+          </>}
           {localProjects.length > 0 && <>
             <div className="project-menu-label recent-label">ON THIS DEVICE</div>
             {localProjects.slice(0, 5).map((item) => <button className={`local-project-item ${item.id === project.project.id ? 'current' : ''}`} key={item.id} onClick={() => openLocalProject(item.id)}><span>{item.name}</span><small>{new Date(item.updatedAt).toLocaleDateString()}</small></button>)}
           </>}
           {currentUser && <>
             <div className="project-menu-label recent-label">IN YOUR ACCOUNT</div>
-            {cloudProjectsLoading ? <div className="cloud-project-message">Loading account projects…</div> : cloudProjectsError ? <div className="cloud-project-message error" role="alert">{cloudProjectsError}</div> : cloudProjects.length > 0 ? cloudProjects.map((item) => <button className={`local-project-item ${item.id === cloudProjectId ? 'current' : ''}`} key={item.id} disabled={openingCloudProjectId !== ''} onClick={() => void openCloudProject(item.id)}><span>{openingCloudProjectId === item.id ? 'Opening…' : item.name}</span><small>{new Date(item.updated_at).toLocaleDateString()}</small></button>) : <div className="cloud-project-message">No account projects yet.</div>}
+            {cloudProjectsLoading ? <div className="cloud-project-message">Loading account projects…</div> : cloudProjectsError ? <div className="cloud-project-message error" role="alert">{cloudProjectsError}</div> : cloudProjects.length > 0 ? cloudProjects.map((item) => <div className={`cloud-project-row ${item.id === cloudProjectId ? 'current' : ''}`} key={item.id}><button className="local-project-item" disabled={openingCloudProjectId !== '' || deletingCloudProjectId !== ''} onClick={() => void openCloudProject(item.id)}><span>{openingCloudProjectId === item.id ? 'Opening…' : deletingCloudProjectId === item.id ? 'Deleting…' : item.name}</span><small>{new Date(item.updated_at).toLocaleDateString()}</small></button><button className="cloud-project-delete" aria-label={`Delete account project ${item.name}`} disabled={openingCloudProjectId !== '' || deletingCloudProjectId !== ''} onClick={() => void removeCloudProject(item)}><Trash2 size={13}/></button></div>) : <div className="cloud-project-message">No account projects yet.</div>}
           </>}
         </div>}
         <span className={`save-indicator ${saved ? '' : 'unsaved'}`}><Cloud size={13}/>{saved ? 'All changes saved' : 'Unsaved changes'}</span>
@@ -895,7 +1099,7 @@ export default function App() {
     <section className="workspace">
       <nav className="tool-rail" aria-label="Creative tools">
         <div className="rail-top"><button className="rail-project" title="Project files"><FolderOpen size={17}/></button><span className="rail-separator"/></div>
-        {tools.map(({ id, label, icon: Icon }) => <button key={id} className={`tool-button ${activeTool === id ? 'selected' : ''}`} onClick={() => { setActiveTool(id); if (id === 'captions' || id === 'text' || id === 'transitions') setPreviewMode('timeline'); }} aria-pressed={activeTool === id}><Icon size={18}/><span>{label}</span></button>)}
+        {tools.map(({ id, label, icon: Icon }) => <button key={id} className={`tool-button ${activeTool === id ? 'selected' : ''}`} onClick={() => { setActiveTool(id); if (id === 'captions' || id === 'text' || id === 'transitions') setPreviewMode('timeline'); if (id === 'image' && !selectedImageLayerId) setSelectedImageLayerId(project.imageLayers.at(-1)?.id ?? null); }} aria-pressed={activeTool === id}><Icon size={18}/><span>{label}</span></button>)}
         <div className="rail-bottom"><button className="tool-button" title="Settings"><Settings2 size={18}/><span>Settings</span></button></div>
       </nav>
 
@@ -909,7 +1113,35 @@ export default function App() {
           <div className="asset-filter"><span>ALL MEDIA</span><button>Recent <ChevronDown size={12}/></button></div>
           {project.assets.length ? <div className="asset-list">{project.assets.map((asset) => <div className={`asset-row ${selectedAssetId === asset.id ? 'asset-selected' : ''}`} key={asset.id} onClick={() => { setSelectedAssetId(asset.id); setSelectedClipId(null); setPreviewMode('asset'); setPlayhead(0); setPlaying(false); }}><div className={`asset-thumb ${asset.kind}`}>{asset.kind === 'audio' ? <Music2 size={15}/> : asset.kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{asset.name}</strong><span>{asset.kind} · {((asset.size ?? 0) / 1048576).toFixed(1)} MB</span></div><button className="mini-add" title="Add to timeline" onClick={(event) => { event.stopPropagation(); addAssetToTimeline(asset.id); }}><Plus size={15}/></button></div>)}</div> : <div className="empty-media"><div className="empty-stack"><Image size={18}/><Music2 size={17}/><Film size={18}/></div><strong>Your library is ready</strong><p>Bring in footage, images, or audio to begin building your story.</p><button onClick={() => fileRef.current?.click()}><Plus size={14}/>Add your first media</button></div>}
           <div className="storage-meter"><div><span>LOCAL PROJECT</span><MoreHorizontal size={15}/></div><div className="meter"><i style={{ width: `${Math.min(100, project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / (500 * 1048576) * 100)}%` }}/></div><small>{(project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / 1048576).toFixed(1)} MB on this device</small></div>
-        </> : activeTool === 'audio' ? <div className="audio-editor-panel">
+        </> : activeTool === 'image' ? <div className="image-studio-panel">
+          <div className="effects-intro"><span className="eyebrow">EDITABLE COMPOSITION</span><p>Image layers stay separate in the project. Reorder, hide, transform, and blend them on the canvas.</p></div>
+          <div className="image-layer-toolbar"><strong>Layers · {project.imageLayers.length}</strong><button className="tool-chip" disabled={!selectedImageLayer} onClick={() => selectedImageLayer && duplicateImageLayer(selectedImageLayer.id)}><Copy size={13}/>Duplicate</button></div>
+          {!project.imageLayers.length ? <div className="effects-empty">Import an image from Media to start a layered composition.</div> : <div className="image-layer-list">
+            {[...project.imageLayers].reverse().map((layer) => <div key={layer.id} className={`image-layer-row ${layer.id === selectedImageLayerId ? 'selected' : ''}`}>
+              <button className="image-layer-select" onClick={() => { setSelectedImageLayerId(layer.id); setSelectedAssetId(layer.assetId); setPreviewMode('asset'); }}><span className="image-layer-thumb"><Image size={14}/></span><span><strong>{layer.name}</strong><small>{project.assets.find((asset) => asset.id === layer.assetId)?.name ?? 'Missing image'}</small></span></button>
+              <button className="image-layer-icon" aria-label={`${layer.visible ? 'Hide' : 'Show'} ${layer.name}`} onClick={() => updateImageLayer(layer.id, { visible: !layer.visible })}>{layer.visible ? <Eye size={14}/> : <EyeOff size={14}/>}</button>
+              <button className="image-layer-icon" aria-label={`${layer.locked ? 'Unlock' : 'Lock'} ${layer.name}`} onClick={() => updateImageLayer(layer.id, { locked: !layer.locked })}>{layer.locked ? <Lock size={14}/> : <Unlock size={14}/>}</button>
+              <button className="image-layer-icon" aria-label={`Move ${layer.name} up`} onClick={() => reorderImageLayer(layer.id, 1)}><ArrowUp size={14}/></button>
+              <button className="image-layer-icon" aria-label={`Move ${layer.name} down`} onClick={() => reorderImageLayer(layer.id, -1)}><ArrowDown size={14}/></button>
+              <button className="image-layer-icon danger" aria-label={`Remove ${layer.name}`} onClick={() => deleteImageLayer(layer.id)}><Trash2 size={14}/></button>
+            </div>)}
+          </div>}
+          {selectedImageLayer && <section className="image-layer-properties">
+            <header><span>SELECTED LAYER</span><small>{selectedImageLayer.locked ? 'Locked' : 'Editable'}</small></header>
+            <label className="image-layer-field">Layer name<input aria-label="Layer name" value={selectedImageLayer.name} onChange={(event) => updateImageLayer(selectedImageLayer.id, { name: event.target.value })}/></label>
+            <div className="visual-transform-grid">
+              <label>Position X (%)<input aria-label="Layer X" type="number" value={selectedImageLayer.x} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { x: event.currentTarget.valueAsNumber || 0 })}/></label>
+              <label>Position Y (%)<input aria-label="Layer Y" type="number" value={selectedImageLayer.y} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { y: event.currentTarget.valueAsNumber || 0 })}/></label>
+              <label>Scale (%)<input aria-label="Layer scale" type="number" min="10" max="500" value={Math.round(selectedImageLayer.scale * 100)} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { scale: event.currentTarget.valueAsNumber / 100 })}/></label>
+              <label>Rotation<input aria-label="Layer rotation" type="number" value={selectedImageLayer.rotation} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { rotation: event.currentTarget.valueAsNumber })}/></label>
+            </div>
+            <label className="image-layer-field">Blend mode<select aria-label="Blend mode" value={selectedImageLayer.blendMode} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { blendMode: event.currentTarget.value as ImageLayer['blendMode'] })}><option value="normal">Normal</option><option value="multiply">Multiply</option><option value="screen">Screen</option><option value="overlay">Overlay</option></select></label>
+            <label className="visual-opacity-label">Opacity <output>{Math.round(selectedImageLayer.opacity * 100)}%</output></label><input aria-label="Layer opacity" type="range" min="0" max="1" step="0.01" disabled={selectedImageLayer.locked} value={selectedImageLayer.opacity} onChange={(event) => updateImageLayer(selectedImageLayer.id, { opacity: Number(event.target.value) })}/>
+            <div className="image-crop-heading">NON-DESTRUCTIVE CROP · %</div><div className="visual-transform-grid image-crop-grid">
+              {([['cropLeft', 'Crop left'], ['cropTop', 'Crop top'], ['cropRight', 'Crop right'], ['cropBottom', 'Crop bottom']] as const).map(([edge, label]) => <label key={edge}>{label}<input aria-label={label} type="number" min="0" max="95" step="1" value={Math.round(selectedImageLayer[edge] * 100)} disabled={selectedImageLayer.locked} onChange={(event) => updateLayerCrop(selectedImageLayer.id, edge, event.currentTarget.valueAsNumber || 0)}/></label>)}
+            </div>
+          </section>}
+        </div> : activeTool === 'audio' ? <div className="audio-editor-panel">
           <div className="effects-intro"><span className="eyebrow">CLIP MIXER</span><p>Set the level for an audio-track clip. Track mute is controlled from the timeline.</p></div>
           {selectedClip && selectedClipTrack?.kind === 'audio' ? <section className="audio-clip-control">
             <strong>{project.assets.find((asset) => asset.id === selectedClip.assetId)?.name ?? 'Selected clip'}</strong>
@@ -986,7 +1218,13 @@ export default function App() {
           <div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/>
           <div className="canvas-frame" style={{ aspectRatio: `${project.canvas.width} / ${project.canvas.height}`, transform: `scale(${canvasZoom})` }}>
             <div className="canvas-gradient" style={{ background: project.canvas.background }}>
-              {previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} colorAdjustments={project.colorAdjustments} overlays={project.textOverlays} playhead={playhead} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
+              {activeTool === 'image' ? <div className="image-composition" aria-label="Layered image composition">{project.imageLayers.map((layer, index) => {
+                const asset = project.assets.find((item) => item.id === layer.assetId);
+                const url = mediaUrls[layer.assetId];
+                if (!layer.visible || !asset || !url) return null;
+                const style = effectStyle(project.effects, asset.id, project.colorAdjustments[asset.id]);
+                return <img key={layer.id} alt={layer.name} src={url} draggable={false} onPointerDown={(event) => beginImageLayerDrag(event, layer)} onPointerMove={moveImageLayer} onPointerUp={finishImageLayerDrag} onPointerCancel={finishImageLayerDrag} style={{ zIndex: index, opacity: layer.opacity, mixBlendMode: layer.blendMode, filter: style.filter, clipPath: `inset(${layer.cropTop * 100}% ${layer.cropRight * 100}% ${layer.cropBottom * 100}% ${layer.cropLeft * 100}%)`, transform: `translate(${layer.x}%, ${layer.y}%) rotate(${layer.rotation}deg) scale(${layer.scale})`, cursor: layer.locked ? 'default' : 'grab', touchAction: 'none' }} />;
+              })}</div> : previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} colorAdjustments={project.colorAdjustments} overlays={project.textOverlays} playhead={playhead} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
                 {selectedAsset.kind === 'video' ? <video src={mediaUrls[selectedAsset.id]} style={{ filter: previewEffect.filter }} playsInline controls/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name} style={{ filter: previewEffect.filter }}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls/></div>}
                 {selectedAsset.kind !== 'audio' && previewEffect.vignette > 0 && <div className="preview-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${previewEffect.vignette * 0.78}) 100%)` }}/>}
               </div> : <><div className="canvas-glow one"/><div className="canvas-glow two"/><div className="canvas-center"><div className="center-mark"><Clapperboard size={21}/></div><span className="canvas-overline">{selectedAsset ? 'MEDIA PREVIEW' : 'YOUR NEXT STORY'}</span><strong>{selectedAsset ? selectedAsset.name : <>Make room<br/>for the <em>moment.</em></>}</strong><span className="canvas-caption">{selectedAsset ? loadingAssetId === selectedAsset.id ? 'Restoring media…' : 'Media preview is unavailable on this device.' : 'A new canvas is a blank invitation.'}</span></div></>}

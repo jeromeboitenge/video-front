@@ -3,7 +3,7 @@ import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, Circl
 import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type ImageLayer, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
 import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
 import { audioGainAt, renderEditedImage, renderProjectVideo } from './export';
-import { authenticate, createCloudProjectVersion, deleteCloudProject, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjectVersions, listCloudProjects, restoreCloudProjectVersion, saveCloudProject, uploadCloudMedia, type CloudProject, type CloudProjectVersion } from './api';
+import { authenticate, createCloudProjectVersion, deleteCloudMedia, deleteCloudProject, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjectVersions, listCloudProjects, restoreCloudProjectVersion, saveCloudProject, uploadCloudMedia, type CloudProject, type CloudProjectVersion } from './api';
 import { readMedia, storeMedia } from './mediaStore';
 import { decodeAudioWaveform, waveformPeaksForClip, type AudioWaveform } from './waveform';
 import { CreativeToolsPanel } from './CreativeToolsPanel';
@@ -148,6 +148,7 @@ export default function App() {
   const [cloudProjectsError, setCloudProjectsError] = useState('');
   const [openingCloudProjectId, setOpeningCloudProjectId] = useState('');
   const [deletingCloudProjectId, setDeletingCloudProjectId] = useState('');
+  const [deletingCloudMediaId, setDeletingCloudMediaId] = useState('');
   const [savingVersion, setSavingVersion] = useState(false);
   const [restoringVersionId, setRestoringVersionId] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
@@ -965,6 +966,32 @@ export default function App() {
       setDeletingCloudProjectId('');
     }
   }
+  async function removeCloudMedia(asset: MediaAsset) {
+    if (!asset.cloudId || deletingCloudMediaId) return;
+    const confirmed = window.confirm(`Delete the uploaded copy of “${asset.name}” from your account? The local device copy stays in this project. Other account projects that reference this file may need to re-upload it.`);
+    if (!confirmed) return;
+    setDeletingCloudMediaId(asset.cloudId);
+    const localOnlyProject = { ...project, assets: project.assets.map((item) => item.id === asset.id ? { ...item, cloudId: undefined } : item) };
+    let cloudProjectDetached = false;
+    try {
+      if (cloudProjectId) {
+        await saveCloudProject(localOnlyProject.project.name, localOnlyProject, cloudProjectId);
+        cloudProjectDetached = true;
+      }
+      await deleteCloudMedia(asset.cloudId);
+      commit(localOnlyProject);
+      setNotice(`Deleted the account copy of “${asset.name}”. Its local copy remains in this project.`);
+    } catch (error) {
+      let restoreFailed = false;
+      if (cloudProjectDetached && cloudProjectId) {
+        try { await saveCloudProject(project.project.name, project, cloudProjectId); }
+        catch { restoreFailed = true; }
+      }
+      setNotice(`Could not delete the account copy of “${asset.name}”: ${(error as Error).message}${restoreFailed ? ' The cloud project could not be rolled back; save it again to synchronize.' : ''}`);
+    } finally {
+      setDeletingCloudMediaId('');
+    }
+  }
   async function saveProjectVersion() {
     if (!cloudProjectId || !currentUser || !sessionStorage.getItem('frameforge:access-token')) {
       setNotice('Sign in and save this project to your account before creating a version.');
@@ -1111,7 +1138,7 @@ export default function App() {
           <button className="import-card" disabled={importingMedia} onClick={() => fileRef.current?.click()}><span className="upload-icon"><Upload size={18}/></span><strong>{importingMedia ? 'Adding media…' : 'Import media'}</strong><span>Video, image, and audio files</span><kbd>⌘ I</kbd></button>
           <input ref={fileRef} type="file" accept="video/*,image/*,audio/*" multiple hidden disabled={importingMedia} onChange={(event) => importFiles(event.target.files)} />
           <div className="asset-filter"><span>ALL MEDIA</span><button>Recent <ChevronDown size={12}/></button></div>
-          {project.assets.length ? <div className="asset-list">{project.assets.map((asset) => <div className={`asset-row ${selectedAssetId === asset.id ? 'asset-selected' : ''}`} key={asset.id} onClick={() => { setSelectedAssetId(asset.id); setSelectedClipId(null); setPreviewMode('asset'); setPlayhead(0); setPlaying(false); }}><div className={`asset-thumb ${asset.kind}`}>{asset.kind === 'audio' ? <Music2 size={15}/> : asset.kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{asset.name}</strong><span>{asset.kind} · {((asset.size ?? 0) / 1048576).toFixed(1)} MB</span></div><button className="mini-add" title="Add to timeline" onClick={(event) => { event.stopPropagation(); addAssetToTimeline(asset.id); }}><Plus size={15}/></button></div>)}</div> : <div className="empty-media"><div className="empty-stack"><Image size={18}/><Music2 size={17}/><Film size={18}/></div><strong>Your library is ready</strong><p>Bring in footage, images, or audio to begin building your story.</p><button onClick={() => fileRef.current?.click()}><Plus size={14}/>Add your first media</button></div>}
+          {project.assets.length ? <div className="asset-list">{project.assets.map((asset) => <div className={`asset-row ${selectedAssetId === asset.id ? 'asset-selected' : ''}`} key={asset.id} onClick={() => { setSelectedAssetId(asset.id); setSelectedClipId(null); setPreviewMode('asset'); setPlayhead(0); setPlaying(false); }}><div className={`asset-thumb ${asset.kind}`}>{asset.kind === 'audio' ? <Music2 size={15}/> : asset.kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{asset.name}</strong><span>{asset.kind} · {((asset.size ?? 0) / 1048576).toFixed(1)} MB</span></div>{asset.cloudId && <button className="cloud-media-delete" aria-label={`Delete cloud media ${asset.name}`} title="Delete uploaded copy from your account" disabled={deletingCloudMediaId !== ''} onClick={(event) => { event.stopPropagation(); void removeCloudMedia(asset); }}>{deletingCloudMediaId === asset.cloudId ? '…' : <Trash2 size={13}/>}</button>}<button className="mini-add" title="Add to timeline" onClick={(event) => { event.stopPropagation(); addAssetToTimeline(asset.id); }}><Plus size={15}/></button></div>)}</div> : <div className="empty-media"><div className="empty-stack"><Image size={18}/><Music2 size={17}/><Film size={18}/></div><strong>Your library is ready</strong><p>Bring in footage, images, or audio to begin building your story.</p><button onClick={() => fileRef.current?.click()}><Plus size={14}/>Add your first media</button></div>}
           <div className="storage-meter"><div><span>LOCAL PROJECT</span><MoreHorizontal size={15}/></div><div className="meter"><i style={{ width: `${Math.min(100, project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / (500 * 1048576) * 100)}%` }}/></div><small>{(project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / 1048576).toFixed(1)} MB on this device</small></div>
         </> : activeTool === 'image' ? <div className="image-studio-panel">
           <div className="effects-intro"><span className="eyebrow">EDITABLE COMPOSITION</span><p>Image layers stay separate in the project. Reorder, hide, transform, and blend them on the canvas.</p></div>

@@ -150,6 +150,10 @@ export async function getCloudMediaContent(id: string) {
   return response.blob();
 }
 
+export async function deleteCloudMedia(id: string) {
+  return apiRequest<void>(`/media/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
 export async function saveCloudProject(name: string, document: unknown, id?: string) {
   return apiRequest<CloudProject>(id ? `/projects/${id}` : '/projects', { method: id ? 'PUT' : 'POST', body: JSON.stringify({ name, document }) });
 }

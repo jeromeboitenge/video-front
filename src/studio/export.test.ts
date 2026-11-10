@@ -1,8 +1,40 @@
 import { describe, expect, it, vi } from 'vitest';
 import { clipDurationAtSpeed, clipOpacityAt, clipSourceTimeAt, clipTransformAt, makeProject, MAX_CANVAS_PIXELS, parseProjectDocument } from './model';
-import { applyClipTransform, audioGainAt, audioGainFor, createExportPlan, drawEditedImage } from './export';
+import { applyClipTransform, audioGainAt, audioGainFor, createExportPlan, drawEditedImage, renderEditedImage } from './export';
+import { readMedia } from './mediaStore';
+
+vi.mock('./mediaStore', () => ({ readMedia: vi.fn().mockResolvedValue(new Blob(['image'], { type: 'image/png' })) }));
 
 describe('video export plan', () => {
+  it('renders visible image layers with their opacity, blend mode, and transforms', async () => {
+    vi.mocked(readMedia).mockResolvedValue(new Blob(['image'], { type: 'image/png' }));
+    const project = makeProject();
+    project.assets = [{ id: 'image-1', name: 'poster.png', kind: 'image', mimeType: 'image/png', size: 10 }];
+    project.imageLayers = [{ id: 'layer-1', assetId: 'image-1', name: 'Poster', visible: true, locked: false, opacity: 0.5, blendMode: 'multiply', x: 10, y: -5, scale: 1.2, rotation: 15, cropLeft: 0.1, cropTop: 0, cropRight: 0, cropBottom: 0 }];
+    const drawImage = vi.fn();
+    const context = {
+      save: vi.fn(), restore: vi.fn(), translate: vi.fn(), rotate: vi.fn(), scale: vi.fn(), beginPath: vi.fn(), rect: vi.fn(), clip: vi.fn(), drawImage,
+      globalAlpha: 1, globalCompositeOperation: 'source-over', filter: 'none',
+    } as unknown as CanvasRenderingContext2D;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context);
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback) => callback(new Blob(['png'], { type: 'image/png' })));
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 100, height: 200, close: vi.fn() }));
+
+    const result = await renderEditedImage(project.assets[0], project);
+
+    expect(result.type).toBe('image/png');
+    expect(readMedia).toHaveBeenCalledWith('image-1');
+    expect(context.globalAlpha).toBe(0.5);
+    expect(context.globalCompositeOperation).toBe('multiply');
+    expect(context.translate).toHaveBeenCalledWith(540 + 108, 960 - 96);
+    expect(context.rotate).toHaveBeenCalledWith(15 * Math.PI / 180);
+    expect(context.scale).toHaveBeenCalledWith(1.2, 1.2);
+    expect(context.rect).toHaveBeenCalledWith(108, 0, 972, 1920);
+    expect(context.clip).toHaveBeenCalledOnce();
+    expect(drawImage).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
   it('draws image adjustments and vignette effects into the still-image export canvas', () => {
     const filterValues: string[] = [];
     const stops: [number, string][] = [];
@@ -42,6 +74,18 @@ describe('video export plan', () => {
     project.canvas.width = 1080;
     project.canvas.height = 1920;
     project.canvas.fps = 121;
+    expect(() => parseProjectDocument(project)).toThrow('This project document is not a supported Frameforge version.');
+  });
+
+  it('migrates old image layers to full-canvas crop defaults and rejects empty crop regions', () => {
+    const project = makeProject();
+    project.assets = [{ id: 'image-1', name: 'poster.png', kind: 'image', mimeType: 'image/png', size: 10 }];
+    project.imageLayers = [{ id: 'layer-1', assetId: 'image-1', name: 'Poster', visible: true, locked: false, opacity: 1, blendMode: 'normal', x: 0, y: 0, scale: 1, rotation: 0, cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }];
+    const legacy = structuredClone(project) as Record<string, unknown>;
+    legacy.imageLayers = [{ id: 'layer-1', assetId: 'image-1', name: 'Poster', visible: true, locked: false, opacity: 1, blendMode: 'normal', x: 0, y: 0, scale: 1, rotation: 0 }];
+    expect(parseProjectDocument(legacy).imageLayers[0]).toMatchObject({ cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 });
+    project.imageLayers[0].cropLeft = 0.8;
+    project.imageLayers[0].cropRight = 0.2;
     expect(() => parseProjectDocument(project)).toThrow('This project document is not a supported Frameforge version.');
   });
 

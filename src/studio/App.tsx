@@ -3,7 +3,7 @@ import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, Circl
 import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type ImageLayer, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
 import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
 import { audioGainAt, renderEditedImage, renderProjectVideo } from './export';
-import { authenticate, createCloudProjectVersion, deleteCloudMedia, deleteCloudProject, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudMedia, listCloudProjectVersions, listCloudProjects, restoreCloudProjectVersion, saveCloudProject, uploadCloudMedia, type CloudMedia, type CloudProject, type CloudProjectVersion } from './api';
+import { ApiError, authenticate, createCloudProjectVersion, deleteCloudMedia, deleteCloudProject, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudMedia, listCloudProjectVersions, listCloudProjects, restoreCloudProjectVersion, saveCloudProject, uploadCloudMedia, type CloudMedia, type CloudProject, type CloudProjectVersion } from './api';
 import { readMedia, storeMedia } from './mediaStore';
 import { decodeAudioWaveform, waveformPeaksForClip, type AudioWaveform } from './waveform';
 import { CreativeToolsPanel } from './CreativeToolsPanel';
@@ -16,6 +16,7 @@ const tools: { id: ToolId; label: string; icon: typeof Film }[] = [
   { id: 'transitions', label: 'Transitions', icon: Layers3 }, { id: 'ai', label: 'AI studio', icon: WandSparkles },
 ];
 const cloudProjectKey = (userId: string, localProjectId: string) => `frameforge:cloud-project:${userId}:${localProjectId}`;
+const cloudRevisionKey = (userId: string, localProjectId: string) => `frameforge:cloud-revision:${userId}:${localProjectId}`;
 const colorAdjustmentControls: { field: keyof ColorAdjustment; label: string }[] = [
   { field: 'exposure', label: 'Exposure' },
   { field: 'contrast', label: 'Contrast' },
@@ -146,6 +147,15 @@ export default function App() {
   const [cloudProjectId, setCloudProjectId] = useState(() => {
     try { const user = JSON.parse(sessionStorage.getItem('frameforge:user') ?? 'null') as { id?: string } | null; return user?.id ? localStorage.getItem(cloudProjectKey(user.id, project.project.id)) ?? '' : ''; } catch { return ''; }
   });
+  const [cloudProjectRevision, setCloudProjectRevision] = useState<number | null>(() => {
+    try {
+      const user = JSON.parse(sessionStorage.getItem('frameforge:user') ?? 'null') as { id?: string } | null;
+      const revision = user?.id ? Number(localStorage.getItem(cloudRevisionKey(user.id, project.project.id))) : NaN;
+      return Number.isInteger(revision) && revision > 0 ? revision : null;
+    } catch { return null; }
+  });
+  const [cloudConflict, setCloudConflict] = useState('');
+  const [resolvingCloudConflict, setResolvingCloudConflict] = useState(false);
   const [cloudProjects, setCloudProjects] = useState<CloudProject[]>([]);
   const [cloudVersions, setCloudVersions] = useState<CloudProjectVersion[]>([]);
   const [cloudVersionsLoading, setCloudVersionsLoading] = useState(false);
@@ -175,6 +185,9 @@ export default function App() {
   const timelineDrag = useRef<TimelineDrag | null>(null);
   const imageLayerDrag = useRef<ImageLayerDrag | null>(null);
   const exportAbort = useRef<AbortController | null>(null);
+  const cloudProjectRevisionRef = useRef<number | null>(cloudProjectRevision);
+  const lastSyncedCloudDocumentRef = useRef<{ id: string; document: string } | null>(null);
+  const cloudSaveInFlightRef = useRef<{ key: string; localProjectId: string; promise: Promise<CloudProject> } | null>(null);
   const [saved, setSaved] = useState(true);
   const lastClipEnd = Math.max(
     project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0),
@@ -457,11 +470,21 @@ export default function App() {
 
   useEffect(() => {
     if (!sessionStorage.getItem('frameforge:access-token') || !cloudProjectId) return;
+    if (cloudConflict) return;
+    if (cloudProjectRevisionRef.current == null) {
+      setCloudConflict('This account project has no saved revision on this device. Choose reload or keep your local version before cloud sync continues.');
+      return;
+    }
+    if (lastSyncedCloudDocumentRef.current?.id === cloudProjectId && lastSyncedCloudDocumentRef.current.document === JSON.stringify(project)) return;
     const timer = window.setTimeout(() => {
-      void saveCloudProject(project.project.name, project, cloudProjectId).catch((error: Error) => setNotice(`Cloud save failed: ${error.message}`));
+      if (lastSyncedCloudDocumentRef.current?.id === cloudProjectId && lastSyncedCloudDocumentRef.current.document === JSON.stringify(project)) return;
+      void persistCloudProject(project).catch((error: Error) => {
+        if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message);
+        else setNotice(`Cloud save failed: ${error.message}`);
+      });
     }, 1400);
     return () => window.clearTimeout(timer);
-  }, [project, cloudProjectId]);
+  }, [project, cloudProjectId, cloudConflict]);
 
   useEffect(() => {
     if (!projectMenuOpen || !currentUser) return;
@@ -532,6 +555,41 @@ export default function App() {
   function commit(next: ProjectDocument) { undoStack.current.push(project); redoStack.current = []; setProject(next); setSaved(false); }
   function undo() { const prior = undoStack.current.pop(); if (prior) { redoStack.current.push(project); setProject(prior); setSaved(false); } }
   function redo() { const next = redoStack.current.pop(); if (next) { undoStack.current.push(project); setProject(next); setSaved(false); } }
+  function rememberCloudRevision(localProjectId: string, revision: number) {
+    cloudProjectRevisionRef.current = revision;
+    setCloudProjectRevision(revision);
+    if (currentUser) {
+      try { localStorage.setItem(cloudRevisionKey(currentUser.id, localProjectId), String(revision)); }
+      catch { setNotice('Project revision is active for this session but could not be saved to this device.'); }
+    }
+  }
+  async function persistCloudProject(document: ProjectDocument, id = cloudProjectId, expectedOverride?: number) {
+    const key = `${id}:${JSON.stringify(document)}`;
+    const inFlight = cloudSaveInFlightRef.current;
+    if (inFlight) {
+      if (inFlight.key === key) return inFlight.promise;
+      const completed = await inFlight.promise;
+      const nextId = id || (inFlight.localProjectId === document.project.id ? completed.id : '');
+      return persistCloudProject(document, nextId, expectedOverride);
+    }
+    const expectedRevision = id ? expectedOverride ?? cloudProjectRevisionRef.current : undefined;
+    if (id && expectedRevision == null) throw new ApiError('The saved project revision is unknown. Reload the account copy or explicitly keep this local version.', 409, 'project_conflict');
+    const promise = saveCloudProject(document.project.name, document, id || undefined, expectedRevision);
+    cloudSaveInFlightRef.current = { key, localProjectId: document.project.id, promise };
+    try {
+      const remote = await promise;
+      setCloudProjectId(remote.id);
+      rememberCloudRevision(document.project.id, remote.revision);
+      lastSyncedCloudDocumentRef.current = { id: remote.id, document: JSON.stringify(document) };
+      if (currentUser) {
+        try { localStorage.setItem(cloudProjectKey(currentUser.id, document.project.id), remote.id); }
+        catch { setNotice('Project saved to your account, but this device could not store its account link.'); }
+      }
+      return remote;
+    } finally {
+      if (cloudSaveInFlightRef.current?.promise === promise) cloudSaveInFlightRef.current = null;
+    }
+  }
   function toggleSafeMargins() {
     commit({ ...project, settings: { ...project.settings, safeMargins: !safeMarginsEnabled } });
   }
@@ -942,8 +1000,8 @@ export default function App() {
   async function saveDraft() {
     localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project)); setSaved(true);
     if (sessionStorage.getItem('frameforge:access-token')) {
-      try { const savedProject = await saveCloudProject(project.project.name, project, cloudProjectId || undefined); setCloudProjectId(savedProject.id); if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, project.project.id), savedProject.id); setNotice('Draft and uploaded media references saved on this device and to your account. Local-only media remains on this device.'); }
-      catch (error) { setNotice(`Saved on this device. Cloud save failed: ${(error as Error).message}`); }
+      try { await persistCloudProject(project); setCloudConflict(''); setNotice('Draft and uploaded media references saved on this device and to your account. Local-only media remains on this device.'); }
+      catch (error) { if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message); else setNotice(`Saved on this device. Cloud save failed: ${(error as Error).message}`); }
     } else setNotice('Draft saved on this device. Sign in from the account menu to save to your account.');
   }
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
@@ -951,15 +1009,46 @@ export default function App() {
     try {
       const user = await authenticate(authMode, email, password); setCurrentUser(user); sessionStorage.setItem('frameforge:user', JSON.stringify(user));
       const userProjectId = localStorage.getItem(cloudProjectKey(user.id, project.project.id)) ?? (currentUser?.id === user.id ? cloudProjectId : '');
-      const savedProject = await saveCloudProject(project.project.name, project, userProjectId || undefined); setCloudProjectId(savedProject.id); localStorage.setItem(cloudProjectKey(user.id, project.project.id), savedProject.id);
+      const knownRevision = Number(localStorage.getItem(cloudRevisionKey(user.id, project.project.id)));
+      if (userProjectId) {
+        setCloudProjectId(userProjectId);
+        if (Number.isInteger(knownRevision) && knownRevision > 0) {
+          setCloudProjectRevision(knownRevision);
+          cloudProjectRevisionRef.current = knownRevision;
+        }
+      }
+      if (userProjectId && (!Number.isInteger(knownRevision) || knownRevision < 1)) {
+        const remote = await getCloudProject(userProjectId);
+        setCloudProjectId(remote.id);
+        setCloudProjectRevision(remote.revision);
+        cloudProjectRevisionRef.current = remote.revision;
+        setCloudConflict('This account project has no saved revision on this device. Choose reload or explicitly keep your local version before cloud sync continues.');
+        setAccountOpen(false); setPassword(''); setNotice(`Signed in as ${user.email}. Resolve the project sync choice before cloud autosave resumes.`);
+        return;
+      }
+      const savedProject = userProjectId
+        ? await saveCloudProject(project.project.name, project, userProjectId, knownRevision)
+        : await saveCloudProject(project.project.name, project);
+      setCloudProjectId(savedProject.id);
+      setCloudProjectRevision(savedProject.revision);
+      cloudProjectRevisionRef.current = savedProject.revision;
+      lastSyncedCloudDocumentRef.current = { id: savedProject.id, document: JSON.stringify(project) };
+      localStorage.setItem(cloudProjectKey(user.id, project.project.id), savedProject.id);
+      localStorage.setItem(cloudRevisionKey(user.id, project.project.id), String(savedProject.revision));
+      setCloudConflict('');
       setAccountOpen(false); setPassword(''); setNotice(`Signed in as ${user.email}; project synced.`);
-    } catch (error) { setAuthError((error as Error).message); }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        setCloudConflict(error.message);
+        setAccountOpen(false); setPassword('');
+      } else setAuthError((error as Error).message);
+    }
     finally { setAuthBusy(false); }
   }
-  function signOut() { sessionStorage.removeItem('frameforge:access-token'); sessionStorage.removeItem('frameforge:user'); setCurrentUser(null); setCloudProjectId(''); setAccountOpen(false); setAdminPanelOpen(false); setNotice('Signed out. This device draft remains available.'); }
+  function signOut() { sessionStorage.removeItem('frameforge:access-token'); sessionStorage.removeItem('frameforge:user'); setCurrentUser(null); setCloudProjectId(''); setCloudProjectRevision(null); cloudProjectRevisionRef.current = null; lastSyncedCloudDocumentRef.current = null; setCloudConflict(''); setAccountOpen(false); setAdminPanelOpen(false); setNotice('Signed out. This device draft remains available.'); }
   function startNewProject() {
     localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
-    setProject(makeProject()); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(''); setProjectMenuOpen(false); setSaved(false);
+    setProject(makeProject()); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(''); setCloudProjectRevision(null); cloudProjectRevisionRef.current = null; lastSyncedCloudDocumentRef.current = null; setCloudConflict(''); setProjectMenuOpen(false); setSaved(false);
   }
   async function duplicateCurrentProject() {
     const duplicate = structuredClone(project);
@@ -972,13 +1061,12 @@ export default function App() {
     setPlaying(false);
     setPlayhead(0);
     setPreviewMode(duplicate.clips.length ? 'timeline' : 'asset');
-    setCloudProjectId('');
+    setCloudProjectId(''); setCloudProjectRevision(null); cloudProjectRevisionRef.current = null; lastSyncedCloudDocumentRef.current = null; setCloudConflict('');
     setProjectMenuOpen(false);
     setSaved(true);
     if (currentUser && sessionStorage.getItem('frameforge:access-token')) {
       try {
-        const savedProject = await saveCloudProject(duplicate.project.name, duplicate);
-        setCloudProjectId(savedProject.id);
+        const savedProject = await persistCloudProject(duplicate, '');
         localStorage.setItem(cloudProjectKey(currentUser.id, duplicate.project.id), savedProject.id);
         setNotice(`Created a copy of “${project.project.name}” and synced it to your account.`);
       } catch (error) {
@@ -989,7 +1077,18 @@ export default function App() {
     }
   }
   function openLocalProject(id: string) {
-    try { const savedProject = localStorage.getItem(`frameforge:${id}`); if (!savedProject) throw new Error('Project draft not found on this device.'); const restored = parseProjectDocument(JSON.parse(savedProject)); setProject(restored); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(currentUser ? localStorage.getItem(cloudProjectKey(currentUser.id, id)) ?? '' : ''); setProjectMenuOpen(false); setSaved(true); }
+    try {
+      const savedProject = localStorage.getItem(`frameforge:${id}`);
+      if (!savedProject) throw new Error('Project draft not found on this device.');
+      const restored = parseProjectDocument(JSON.parse(savedProject));
+      lastSyncedCloudDocumentRef.current = null;
+      const mappedCloudId = currentUser ? localStorage.getItem(cloudProjectKey(currentUser.id, id)) ?? '' : '';
+      const storedRevision = currentUser && mappedCloudId ? Number(localStorage.getItem(cloudRevisionKey(currentUser.id, id))) : NaN;
+      const revision = Number.isInteger(storedRevision) && storedRevision > 0 ? storedRevision : null;
+      setProject(restored); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(mappedCloudId); setCloudProjectRevision(revision); cloudProjectRevisionRef.current = revision;
+      setCloudConflict(mappedCloudId && revision == null ? 'This account project has no saved revision on this device. Choose reload or explicitly keep your local version before cloud sync continues.' : '');
+      setProjectMenuOpen(false); setSaved(true);
+    }
     catch (error) { setNotice((error as Error).message); }
   }
   function removeLocalProject(item: { id: string; name: string }) {
@@ -998,7 +1097,10 @@ export default function App() {
     setDeletingLocalProjectId(item.id);
     try {
       localStorage.removeItem(`frameforge:${item.id}`);
-      if (currentUser) localStorage.removeItem(cloudProjectKey(currentUser.id, item.id));
+      if (currentUser) {
+        localStorage.removeItem(cloudProjectKey(currentUser.id, item.id));
+        localStorage.removeItem(cloudRevisionKey(currentUser.id, item.id));
+      }
       const next = localProjects.filter((entry) => entry.id !== item.id);
       setLocalProjects(next);
       localStorage.setItem('frameforge:projects-index', JSON.stringify(next));
@@ -1014,6 +1116,7 @@ export default function App() {
     try {
       const remote = await getCloudProject(id);
       const restored = parseProjectDocument(remote.document);
+      lastSyncedCloudDocumentRef.current = { id: remote.id, document: JSON.stringify(restored) };
       localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
       setProject(restored);
       setSelectedAssetId(null);
@@ -1022,6 +1125,8 @@ export default function App() {
       setPreviewMode('asset');
       setPlayhead(0);
       setCloudProjectId(remote.id);
+      rememberCloudRevision(restored.project.id, remote.revision);
+      setCloudConflict('');
       if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, restored.project.id), remote.id);
       setProjectMenuOpen(false);
       setSaved(true);
@@ -1045,8 +1150,11 @@ export default function App() {
       await deleteCloudProject(item.id);
       setCloudProjects((items) => items.filter((projectItem) => projectItem.id !== item.id));
       if (activeProject) {
-        setCloudProjectId('');
-        if (currentUser) localStorage.removeItem(cloudProjectKey(currentUser.id, project.project.id));
+        setCloudProjectId(''); setCloudProjectRevision(null); cloudProjectRevisionRef.current = null; setCloudConflict('');
+        if (currentUser) {
+          localStorage.removeItem(cloudProjectKey(currentUser.id, project.project.id));
+          localStorage.removeItem(cloudRevisionKey(currentUser.id, project.project.id));
+        }
       }
       setNotice(`Deleted “${item.name}” from your account. The local device draft remains.`);
     } catch (error) {
@@ -1064,7 +1172,7 @@ export default function App() {
     let cloudProjectDetached = false;
     try {
       if (cloudProjectId) {
-        await saveCloudProject(localOnlyProject.project.name, localOnlyProject, cloudProjectId);
+        await persistCloudProject(localOnlyProject);
         cloudProjectDetached = true;
       }
       await deleteCloudMedia(asset.cloudId);
@@ -1074,13 +1182,75 @@ export default function App() {
     } catch (error) {
       let restoreFailed = false;
       if (cloudProjectDetached && cloudProjectId) {
-        try { await saveCloudProject(project.project.name, project, cloudProjectId); }
+        try { await persistCloudProject(project); }
         catch { restoreFailed = true; }
       }
-      setNotice(`Could not delete the account copy of “${asset.name}”: ${(error as Error).message}${restoreFailed ? ' The cloud project could not be rolled back; save it again to synchronize.' : ''}`);
+      if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message);
+      else setNotice(`Could not delete the account copy of “${asset.name}”: ${(error as Error).message}${restoreFailed ? ' The cloud project could not be rolled back; save it again to synchronize.' : ''}`);
     } finally {
       setDeletingCloudMediaId('');
     }
+  }
+  async function reloadCloudConflict() {
+    if (!cloudProjectId || resolvingCloudConflict) return;
+    setResolvingCloudConflict(true);
+    try {
+      const remote = await getCloudProject(cloudProjectId);
+      const restored = parseProjectDocument(remote.document);
+      lastSyncedCloudDocumentRef.current = { id: remote.id, document: JSON.stringify(restored) };
+      localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
+      localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+      setProject(restored);
+      setSelectedAssetId(null);
+      setSelectedClipId(null);
+      setSelectedImageLayerId(null);
+      setPlaying(false);
+      setPreviewMode(restored.clips.length ? 'timeline' : 'asset');
+      setPlayhead(0);
+      rememberCloudRevision(restored.project.id, remote.revision);
+      if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, restored.project.id), remote.id);
+      setCloudConflict('');
+      setSaved(true);
+      setNotice(`Reloaded the latest account copy of “${remote.name}”. Your previous device draft remains saved locally.`);
+    } catch (error) {
+      setNotice(`Could not reload the account project: ${(error as Error).message}`);
+    } finally {
+      setResolvingCloudConflict(false);
+    }
+  }
+  async function keepLocalCloudConflict() {
+    if (!cloudProjectId || resolvingCloudConflict) return;
+    setResolvingCloudConflict(true);
+    try {
+      const latest = await getCloudProject(cloudProjectId);
+      const backup = await createCloudProjectVersion(cloudProjectId);
+      const savedProject = await saveCloudProject(project.project.name, project, cloudProjectId, latest.revision);
+      setCloudVersions((versions) => [backup, ...versions.filter((item) => item.id !== backup.id)]);
+      rememberCloudRevision(project.project.id, savedProject.revision);
+      lastSyncedCloudDocumentRef.current = { id: savedProject.id, document: JSON.stringify(project) };
+      if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, project.project.id), savedProject.id);
+      setCloudConflict('');
+      setSaved(true);
+      setNotice(`Kept this device version. The displaced account copy is saved as version ${backup.version_number}.`);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message);
+      else setNotice(`Could not keep the local version: ${(error as Error).message}`);
+    } finally {
+      setResolvingCloudConflict(false);
+    }
+  }
+  function keepLocalOnlyAfterConflict() {
+    if (currentUser) {
+      localStorage.removeItem(cloudProjectKey(currentUser.id, project.project.id));
+      localStorage.removeItem(cloudRevisionKey(currentUser.id, project.project.id));
+    }
+    setCloudProjectId('');
+    setCloudProjectRevision(null);
+    cloudProjectRevisionRef.current = null;
+    lastSyncedCloudDocumentRef.current = null;
+    setCloudConflict('');
+    setSaved(true);
+    setNotice('Kept this project as a local draft. It is no longer linked to the account copy.');
   }
   async function saveProjectVersion() {
     if (!cloudProjectId || !currentUser || !sessionStorage.getItem('frameforge:access-token')) {
@@ -1089,24 +1259,32 @@ export default function App() {
     }
     setSavingVersion(true);
     try {
-      await saveCloudProject(project.project.name, project, cloudProjectId);
+      await persistCloudProject(project);
       const version = await createCloudProjectVersion(cloudProjectId);
       setCloudVersions((versions) => [version, ...versions.filter((item) => item.id !== version.id)]);
       setNotice(`Saved version ${version.version_number} to your account.`);
     } catch (error) {
-      setNotice(`Could not save project version: ${(error as Error).message}`);
+      if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message);
+      else setNotice(`Could not save project version: ${(error as Error).message}`);
     } finally {
       setSavingVersion(false);
     }
   }
   async function restoreProjectVersion(version: CloudProjectVersion) {
     if (!cloudProjectId || !window.confirm(`Restore version ${version.version_number} of “${version.name}”? Current edits are saved locally first.`)) return;
+    if (cloudProjectRevisionRef.current == null) {
+      setCloudConflict('This project has no saved revision on this device. Resolve the project sync choice before restoring a version.');
+      return;
+    }
     setRestoringVersionId(version.id);
     try {
       localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
       localStorage.setItem('frameforge:last-project', JSON.stringify(project));
-      const restored = await restoreCloudProjectVersion(cloudProjectId, version.id);
+      const restored = await restoreCloudProjectVersion(cloudProjectId, version.id, cloudProjectRevisionRef.current);
       const document = parseProjectDocument(restored.document);
+      rememberCloudRevision(document.project.id, restored.revision);
+      lastSyncedCloudDocumentRef.current = { id: restored.id, document: JSON.stringify(document) };
+      setCloudConflict('');
       setProject(document);
       setSelectedAssetId(null);
       setSelectedClipId(null);
@@ -1119,7 +1297,8 @@ export default function App() {
       setNotice(`Restored version ${version.version_number}.`);
       setProjectMenuOpen(false);
     } catch (error) {
-      setNotice(`Could not restore project version: ${(error as Error).message}`);
+      if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message);
+      else setNotice(`Could not restore project version: ${(error as Error).message}`);
     } finally {
       setRestoringVersionId('');
     }
@@ -1435,6 +1614,7 @@ export default function App() {
       </section>
     </div>}
     {accountOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) { setAccountOpen(false); setOrganizationRequestOpen(false); setSupportTicketOpen(false); } }}><section className={`account-modal ${organizationRequestOpen || supportTicketOpen ? 'account-modal-request' : ''}`} role="dialog" aria-modal="true" aria-labelledby="account-title"><button className="modal-close" aria-label="Close" onClick={() => { setAccountOpen(false); setOrganizationRequestOpen(false); setSupportTicketOpen(false); }}>×</button><div className="modal-mark"><Clapperboard size={18}/></div><span className="eyebrow">FRAMEFORGE ACCOUNT</span><h2 id="account-title">{organizationRequestOpen ? 'Organisation request' : supportTicketOpen ? 'Contact support' : currentUser ? 'Your workspace' : authMode === 'login' ? 'Welcome back' : 'Create your account'}</h2>{currentUser ? organizationRequestOpen ? <OrganizationRequestForm/> : supportTicketOpen ? <SupportTicketForm/> : <><p className="modal-description">Signed in as <strong>{currentUser.email}</strong>. Your project can sync to your account.</p><button className="modal-submit" onClick={saveDraft}>Sync this project</button><button className="modal-secondary" onClick={() => setOrganizationRequestOpen(true)}>Request an organisation</button><button className="modal-secondary" onClick={() => setSupportTicketOpen(true)}>Contact support</button><button className="modal-secondary" onClick={signOut}>Sign out</button></> : <form onSubmit={submitAuth}><p className="modal-description">Sign in to sync your project. Your local draft stays on this device.</p><label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} required minLength={10} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 10 characters"/></label>{authError && <p className="auth-error" role="alert">{authError}</p>}<button className="modal-submit" disabled={authBusy}>{authBusy ? 'Connecting…' : authMode === 'login' ? 'Sign in and sync' : 'Create account'}</button><button type="button" className="modal-secondary" onClick={() => { setAuthError(''); setAuthMode(authMode === 'login' ? 'register' : 'login'); }}>{authMode === 'login' ? 'New to Frameforge? Create account' : 'Already have an account? Sign in'}</button></form>}</section></div>}
+    {cloudConflict && <div className="modal-backdrop"><section className="account-modal cloud-conflict-modal" role="dialog" aria-modal="true" aria-labelledby="cloud-conflict-title"><div className="modal-mark"><Cloud size={18}/></div><span className="eyebrow">PROJECT SYNC</span><h2 id="cloud-conflict-title">This project changed elsewhere</h2><p className="modal-description" role="alert">{cloudConflict}</p><p className="modal-description">Your current work remains saved as a local draft. Reload the account copy, or replace it after a backup is saved to version history.</p><button className="modal-submit" disabled={resolvingCloudConflict || !cloudProjectId} onClick={() => void reloadCloudConflict()}>{resolvingCloudConflict ? 'Loading…' : 'Reload account version'}</button><button className="modal-secondary" disabled={resolvingCloudConflict || !cloudProjectId} onClick={() => void keepLocalCloudConflict()}>Keep this device version</button><button className="modal-secondary" disabled={resolvingCloudConflict} onClick={keepLocalOnlyAfterConflict}>Keep as local draft only</button></section></div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button onClick={() => setNotice('')}>Dismiss</button></div>}
   </main>;
 }

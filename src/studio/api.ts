@@ -7,15 +7,25 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
   if (token && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`);
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!response.ok) {
-    const body = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(body?.detail ?? `Request failed (${response.status})`);
+    const body = await response.json().catch(() => null) as { detail?: string | { code?: string; message?: string } } | null;
+    const detail = body?.detail;
+    const message = typeof detail === 'string' ? detail : detail?.message;
+    const code = typeof detail === 'object' && detail ? detail.code : undefined;
+    throw new ApiError(message ?? `Request failed (${response.status})`, response.status, code);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 export type Session = { access_token: string; token_type: string; user: { id: string; email: string; is_admin: boolean } };
-export type CloudProject = { id: string; name: string; document: unknown; created_at: string; updated_at: string };
+export type CloudProject = { id: string; name: string; document: unknown; created_at: string; updated_at: string; revision: number };
 export type CloudProjectVersion = { id: string; project_id: string; version_number: number; name: string; created_at: string };
 export type CloudMedia = { id: string; name: string; mime_type: string; size: number; created_at: string };
 export type Organization = { id: string; name: string; slug: string; description: string | null; created_by: string; created_at: string };
@@ -132,8 +142,11 @@ export async function createCloudProjectVersion(projectId: string) {
   return apiRequest<CloudProjectVersion>(`/projects/${encodeURIComponent(projectId)}/versions`, { method: 'POST' });
 }
 
-export async function restoreCloudProjectVersion(projectId: string, versionId: string) {
-  return apiRequest<CloudProject>(`/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/restore`, { method: 'POST' });
+export async function restoreCloudProjectVersion(projectId: string, versionId: string, expectedRevision: number) {
+  return apiRequest<CloudProject>(`/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({ expected_revision: expectedRevision }),
+  });
 }
 
 export async function uploadCloudMedia(file: File) {
@@ -158,6 +171,9 @@ export async function deleteCloudMedia(id: string) {
   return apiRequest<void>(`/media/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
-export async function saveCloudProject(name: string, document: unknown, id?: string) {
-  return apiRequest<CloudProject>(id ? `/projects/${id}` : '/projects', { method: id ? 'PUT' : 'POST', body: JSON.stringify({ name, document }) });
+export async function saveCloudProject(name: string, document: unknown, id?: string, expectedRevision?: number) {
+  return apiRequest<CloudProject>(id ? `/projects/${id}` : '/projects', {
+    method: id ? 'PUT' : 'POST',
+    body: JSON.stringify({ name, document, ...(id && expectedRevision ? { expected_revision: expectedRevision } : {}) }),
+  });
 }

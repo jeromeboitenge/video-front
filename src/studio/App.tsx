@@ -478,6 +478,7 @@ export default function App() {
   }, [projectMenuOpen, currentUser]);
 
   useEffect(() => {
+    if (!currentUser) setCloudMedia([]);
     if (activeTool !== 'media' || mediaLibraryTab !== 'cloud' || !currentUser) {
       setCloudMediaError('');
       setCloudMediaLoading(false);

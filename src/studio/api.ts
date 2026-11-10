@@ -112,6 +112,10 @@ export async function listCloudProjects() {
   return apiRequest<CloudProject[]>('/projects');
 }
 
+export async function listCloudMedia() {
+  return apiRequest<CloudMedia[]>('/media');
+}
+
 export async function getCloudProject(id: string) {
   return apiRequest<CloudProject>(`/projects/${encodeURIComponent(id)}`);
 }

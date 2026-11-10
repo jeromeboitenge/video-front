@@ -3,7 +3,7 @@ import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, Circl
 import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type ImageLayer, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
 import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
 import { audioGainAt, renderEditedImage, renderProjectVideo } from './export';
-import { authenticate, createCloudProjectVersion, deleteCloudMedia, deleteCloudProject, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjectVersions, listCloudProjects, restoreCloudProjectVersion, saveCloudProject, uploadCloudMedia, type CloudProject, type CloudProjectVersion } from './api';
+import { authenticate, createCloudProjectVersion, deleteCloudMedia, deleteCloudProject, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudMedia, listCloudProjectVersions, listCloudProjects, restoreCloudProjectVersion, saveCloudProject, uploadCloudMedia, type CloudMedia, type CloudProject, type CloudProjectVersion } from './api';
 import { readMedia, storeMedia } from './mediaStore';
 import { decodeAudioWaveform, waveformPeaksForClip, type AudioWaveform } from './waveform';
 import { CreativeToolsPanel } from './CreativeToolsPanel';
@@ -119,6 +119,12 @@ export default function App() {
   const [loadingAssetId, setLoadingAssetId] = useState<string | null>(null);
   const [importingMedia, setImportingMedia] = useState(false);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [mediaLibraryTab, setMediaLibraryTab] = useState<'project' | 'cloud'>('project');
+  const [cloudMedia, setCloudMedia] = useState<CloudMedia[]>([]);
+  const [cloudMediaLoading, setCloudMediaLoading] = useState(false);
+  const [cloudMediaError, setCloudMediaError] = useState('');
+  const [cloudMediaReload, setCloudMediaReload] = useState(0);
+  const [addingCloudMediaId, setAddingCloudMediaId] = useState('');
   const [selectedImageLayerId, setSelectedImageLayerId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [trackManagerOpen, setTrackManagerOpen] = useState(false);
@@ -470,6 +476,25 @@ export default function App() {
     });
     return () => { active = false; };
   }, [projectMenuOpen, currentUser]);
+
+  useEffect(() => {
+    if (activeTool !== 'media' || mediaLibraryTab !== 'cloud' || !currentUser) {
+      setCloudMediaError('');
+      setCloudMediaLoading(false);
+      return;
+    }
+    let active = true;
+    setCloudMediaLoading(true);
+    setCloudMediaError('');
+    void listCloudMedia().then((items) => {
+      if (active) setCloudMedia(items);
+    }).catch((error: Error) => {
+      if (active) setCloudMediaError(error.message);
+    }).finally(() => {
+      if (active) setCloudMediaLoading(false);
+    });
+    return () => { active = false; };
+  }, [activeTool, mediaLibraryTab, currentUser, cloudMediaReload]);
 
   useEffect(() => {
     if (!projectMenuOpen || !currentUser || !cloudProjectId) {
@@ -858,6 +883,51 @@ export default function App() {
         : `${additions.length} media item${additions.length === 1 ? '' : 's'} added and stored on this device.`);
     setImportingMedia(false);
   }
+  async function addCloudMediaToProject(item: CloudMedia) {
+    if (addingCloudMediaId) return;
+    const existing = project.assets.find((asset) => asset.cloudId === item.id);
+    if (existing) {
+      setMediaLibraryTab('project');
+      setSelectedAssetId(existing.id);
+      setNotice(`“${item.name}” is already in this project.`);
+      return;
+    }
+    setAddingCloudMediaId(item.id);
+    try {
+      const blob = await getCloudMediaContent(item.id);
+      const assetId = crypto.randomUUID();
+      const kind: MediaAsset['kind'] = item.mime_type.startsWith('audio/') ? 'audio' : item.mime_type.startsWith('image/') ? 'image' : 'video';
+      const asset: MediaAsset = { id: assetId, name: item.name, kind, mimeType: item.mime_type, size: item.size, cloudId: item.id };
+      await storeMedia(assetId, blob);
+      const url = URL.createObjectURL(blob);
+      mediaUrlMap.current = { ...mediaUrlMap.current, [assetId]: url };
+      setMediaUrls({ ...mediaUrlMap.current });
+      const clips = [...project.clips];
+      const track = project.tracks.find((entry) => kind === 'audio' ? entry.kind === 'audio' : entry.kind === 'video');
+      if (track) {
+        const start = clips.filter((clip) => clip.trackId === track.id).reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
+        clips.push({ id: crypto.randomUUID(), assetId, trackId: track.id, start, duration: kind === 'audio' ? 8 : 4, sourceOffset: 0 });
+        setSelectedClipId(clips[clips.length - 1].id);
+        setPlayhead(start);
+        setPreviewMode('timeline');
+      } else {
+        setSelectedClipId(null);
+        setPreviewMode('asset');
+      }
+      const imageLayers: ImageLayer[] = kind === 'image'
+        ? [...project.imageLayers, { id: crypto.randomUUID(), assetId, name: item.name, visible: true, locked: false, opacity: 1, blendMode: 'normal', x: 0, y: 0, scale: 1, rotation: 0, cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }]
+        : project.imageLayers;
+      commit({ ...project, assets: [...project.assets, asset], clips, imageLayers });
+      if (kind === 'image') setSelectedImageLayerId(imageLayers[imageLayers.length - 1].id);
+      setSelectedAssetId(assetId);
+      setMediaLibraryTab('project');
+      setNotice(`Added “${item.name}” from your account library.`);
+    } catch (error) {
+      setNotice(`Could not add “${item.name}” to this project: ${(error as Error).message}`);
+    } finally {
+      setAddingCloudMediaId('');
+    }
+  }
   function addAssetToTimeline(assetId: string) {
     const asset = project.assets.find((item) => item.id === assetId);
     if (!asset) return;
@@ -980,6 +1050,7 @@ export default function App() {
       }
       await deleteCloudMedia(asset.cloudId);
       commit(localOnlyProject);
+      setCloudMedia((items) => items.filter((item) => item.id !== asset.cloudId));
       setNotice(`Deleted the account copy of “${asset.name}”. Its local copy remains in this project.`);
     } catch (error) {
       let restoreFailed = false;
@@ -1134,12 +1205,24 @@ export default function App() {
         <div className="panel-heading"><div><span className="eyebrow">WORKSPACE</span><h1>{toolTitle[activeTool]}</h1></div><button className="icon-button subtle" title="Collapse panel"><PanelLeftClose size={16}/></button></div>
         <div className="search-box"><span>⌕</span><input aria-label="Search media" placeholder={`Search ${activeToolInfo.label.toLowerCase()}`} /><kbd>⌘ K</kbd></div>
         {activeTool === 'media' ? <>
-          <div className="media-tabs"><button className="tab active">Library <span>{project.assets.length}</span></button><button className="tab">Folders</button></div>
-          <button className="import-card" disabled={importingMedia} onClick={() => fileRef.current?.click()}><span className="upload-icon"><Upload size={18}/></span><strong>{importingMedia ? 'Adding media…' : 'Import media'}</strong><span>Video, image, and audio files</span><kbd>⌘ I</kbd></button>
-          <input ref={fileRef} type="file" accept="video/*,image/*,audio/*" multiple hidden disabled={importingMedia} onChange={(event) => importFiles(event.target.files)} />
-          <div className="asset-filter"><span>ALL MEDIA</span><button>Recent <ChevronDown size={12}/></button></div>
-          {project.assets.length ? <div className="asset-list">{project.assets.map((asset) => <div className={`asset-row ${selectedAssetId === asset.id ? 'asset-selected' : ''}`} key={asset.id} onClick={() => { setSelectedAssetId(asset.id); setSelectedClipId(null); setPreviewMode('asset'); setPlayhead(0); setPlaying(false); }}><div className={`asset-thumb ${asset.kind}`}>{asset.kind === 'audio' ? <Music2 size={15}/> : asset.kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{asset.name}</strong><span>{asset.kind} · {((asset.size ?? 0) / 1048576).toFixed(1)} MB</span></div>{asset.cloudId && <button className="cloud-media-delete" aria-label={`Delete cloud media ${asset.name}`} title="Delete uploaded copy from your account" disabled={deletingCloudMediaId !== ''} onClick={(event) => { event.stopPropagation(); void removeCloudMedia(asset); }}>{deletingCloudMediaId === asset.cloudId ? '…' : <Trash2 size={13}/>}</button>}<button className="mini-add" title="Add to timeline" onClick={(event) => { event.stopPropagation(); addAssetToTimeline(asset.id); }}><Plus size={15}/></button></div>)}</div> : <div className="empty-media"><div className="empty-stack"><Image size={18}/><Music2 size={17}/><Film size={18}/></div><strong>Your library is ready</strong><p>Bring in footage, images, or audio to begin building your story.</p><button onClick={() => fileRef.current?.click()}><Plus size={14}/>Add your first media</button></div>}
-          <div className="storage-meter"><div><span>LOCAL PROJECT</span><MoreHorizontal size={15}/></div><div className="meter"><i style={{ width: `${Math.min(100, project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / (500 * 1048576) * 100)}%` }}/></div><small>{(project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / 1048576).toFixed(1)} MB on this device</small></div>
+          <div className="media-tabs"><button className={`tab ${mediaLibraryTab === 'project' ? 'active' : ''}`} onClick={() => setMediaLibraryTab('project')}>Library <span>{project.assets.length}</span></button><button className={`tab ${mediaLibraryTab === 'cloud' ? 'active' : ''}`} onClick={() => setMediaLibraryTab('cloud')}>Cloud <span>{currentUser ? cloudMedia.length : '↗'}</span></button></div>
+          {mediaLibraryTab === 'project' ? <>
+            <button className="import-card" disabled={importingMedia} onClick={() => fileRef.current?.click()}><span className="upload-icon"><Upload size={18}/></span><strong>{importingMedia ? 'Adding media…' : 'Import media'}</strong><span>Video, image, and audio files</span><kbd>⌘ I</kbd></button>
+            <input ref={fileRef} type="file" accept="video/*,image/*,audio/*" multiple hidden disabled={importingMedia} onChange={(event) => importFiles(event.target.files)} />
+            <div className="asset-filter"><span>PROJECT MEDIA</span><button>Recent <ChevronDown size={12}/></button></div>
+            {project.assets.length ? <div className="asset-list">{project.assets.map((asset) => <div className={`asset-row ${selectedAssetId === asset.id ? 'asset-selected' : ''}`} key={asset.id} onClick={() => { setSelectedAssetId(asset.id); setSelectedClipId(null); setPreviewMode('asset'); setPlayhead(0); setPlaying(false); }}><div className={`asset-thumb ${asset.kind}`}>{asset.kind === 'audio' ? <Music2 size={15}/> : asset.kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{asset.name}</strong><span>{asset.kind} · {((asset.size ?? 0) / 1048576).toFixed(1)} MB</span></div>{asset.cloudId && <button className="cloud-media-delete" aria-label={`Delete cloud media ${asset.name}`} title="Delete uploaded copy from your account" disabled={deletingCloudMediaId !== ''} onClick={(event) => { event.stopPropagation(); void removeCloudMedia(asset); }}>{deletingCloudMediaId === asset.cloudId ? '…' : <Trash2 size={13}/>}</button>}<button className="mini-add" title="Add to timeline" onClick={(event) => { event.stopPropagation(); addAssetToTimeline(asset.id); }}><Plus size={15}/></button></div>)}</div> : <div className="empty-media"><div className="empty-stack"><Image size={18}/><Music2 size={17}/><Film size={18}/></div><strong>Your library is ready</strong><p>Bring in footage, images, or audio to begin building your story.</p><button onClick={() => fileRef.current?.click()}><Plus size={14}/>Add your first media</button></div>}
+            <div className="storage-meter"><div><span>LOCAL PROJECT</span><MoreHorizontal size={15}/></div><div className="meter"><i style={{ width: `${Math.min(100, project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / (500 * 1048576) * 100)}%` }}/></div><small>{(project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / 1048576).toFixed(1)} MB on this device</small></div>
+          </> : <div className="cloud-media-library">
+            {!currentUser ? <div className="cloud-library-empty"><Cloud size={18}/><strong>Sign in to browse account media</strong><p>Uploaded files from your account will appear here.</p><button onClick={() => setAccountOpen(true)}>Sign in</button></div>
+              : cloudMediaLoading ? <div className="cloud-project-message">Loading account media…</div>
+                : cloudMediaError ? <div className="cloud-project-message error" role="alert">{cloudMediaError}<button className="cloud-media-add" onClick={() => setCloudMediaReload((value) => value + 1)}>Retry</button></div>
+                  : cloudMedia.length ? cloudMedia.map((item) => {
+                    const added = project.assets.some((asset) => asset.cloudId === item.id);
+                    const kind = item.mime_type.startsWith('audio/') ? 'audio' : item.mime_type.startsWith('image/') ? 'image' : 'video';
+                    return <div className="cloud-media-row" key={item.id}><div className={`asset-thumb ${kind}`}>{kind === 'audio' ? <Music2 size={15}/> : kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{item.name}</strong><span>{kind} · {(item.size / 1048576).toFixed(1)} MB</span></div><button className="cloud-media-add" disabled={addingCloudMediaId !== '' || added} onClick={() => void addCloudMediaToProject(item)}>{addingCloudMediaId === item.id ? 'Adding…' : added ? 'Added' : <><Plus size={13}/>Add</>}</button></div>;
+                  })
+                    : <div className="cloud-library-empty"><Cloud size={18}/><strong>No account media yet</strong><p>Import files while signed in to store them with your account.</p></div>}
+          </div>}
         </> : activeTool === 'image' ? <div className="image-studio-panel">
           <div className="effects-intro"><span className="eyebrow">EDITABLE COMPOSITION</span><p>Image layers stay separate in the project. Reorder, hide, transform, and blend them on the canvas.</p></div>
           <div className="image-layer-toolbar"><strong>Layers · {project.imageLayers.length}</strong><button className="tool-chip" disabled={!selectedImageLayer} onClick={() => selectedImageLayer && duplicateImageLayer(selectedImageLayer.id)}><Copy size={13}/>Duplicate</button></div>

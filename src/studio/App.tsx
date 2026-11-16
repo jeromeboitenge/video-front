@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
-import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Eye, EyeOff, Film, FolderOpen, Frame, Gauge, Image, Layers3, Lock, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Pencil, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Unlock, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
+import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Eye, EyeOff, Film, FolderOpen, Frame, Gauge, Image, Layers3, Lock, LockKeyhole, Magnet, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Pencil, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Unlock, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type ImageLayer, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
 import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
 import { audioGainAt, renderEditedImage, renderProjectVideo } from './export';
@@ -41,6 +41,9 @@ type TimelineDrag = {
   originalClip: TimelineClip;
   originalProject: ProjectDocument;
   changed: boolean;
+  snapPoints: number[];
+  snapTolerance: number;
+  snapEnabled: boolean;
 };
 
 type ImageLayerDrag = {
@@ -55,13 +58,25 @@ type ImageLayerDrag = {
   changed: boolean;
 };
 
-function TimelineComposition({ items, mediaUrls, effects, colorAdjustments, overlays, playhead, onMediaElement, onMediaMetadata }: {
+type ImageLayerResize = {
+  layerId: string;
+  centerX: number;
+  centerY: number;
+  startDistance: number;
+  originalScale: number;
+  originalProject: ProjectDocument;
+  changed: boolean;
+};
+
+function TimelineComposition({ items, mediaUrls, effects, colorAdjustments, overlays, playhead, selectedOverlayId, onSelectOverlay, onMediaElement, onMediaMetadata }: {
   items: TimelinePreviewItem[];
   mediaUrls: Record<string, string>;
   effects: AppliedEffect[];
   colorAdjustments: Record<string, ColorAdjustment>;
   overlays: TextOverlay[];
   playhead: number;
+  selectedOverlayId: string | null;
+  onSelectOverlay: (id: string) => void;
   onMediaElement: (clipId: string, element: HTMLMediaElement | null) => void;
   onMediaMetadata: (clipId: string, duration: number) => void;
 }) {
@@ -78,7 +93,7 @@ function TimelineComposition({ items, mediaUrls, effects, colorAdjustments, over
       </div>;
     })}
     {!visuals.length && <div className="timeline-composition-empty">No visual clip at this time</div>}
-    {overlays.filter((overlay) => playhead >= overlay.start && playhead < overlay.start + overlay.duration).map((overlay) => <div key={overlay.id} className={`timeline-text-overlay ${overlay.kind} position-${overlay.position}`} style={{ color: overlay.color, fontSize: `${Math.max(12, overlay.fontSize * 0.28)}px`, fontFamily: overlay.fontFamily ?? 'Manrope', fontWeight: overlay.fontWeight ?? 'bold', fontStyle: overlay.italic ? 'italic' : 'normal', WebkitTextStroke: `${overlay.outlineWidth ?? 0}px ${overlay.outlineColor ?? '#111111'}` }}>{overlay.text}</div>)}
+    {overlays.filter((overlay) => playhead >= overlay.start && playhead < overlay.start + overlay.duration).map((overlay) => <div key={overlay.id} className={`timeline-text-overlay ${overlay.kind} position-${overlay.position} ${selectedOverlayId === overlay.id ? 'overlay-selected' : ''}`} onClick={(event) => { event.stopPropagation(); onSelectOverlay(overlay.id); }} style={{ color: overlay.color, fontSize: `${Math.max(12, overlay.fontSize * 0.28)}px`, fontFamily: overlay.fontFamily ?? 'Manrope', fontWeight: overlay.fontWeight ?? 'bold', fontStyle: overlay.italic ? 'italic' : 'normal', WebkitTextStroke: `${overlay.outlineWidth ?? 0}px ${overlay.outlineColor ?? '#111111'}` }}>{overlay.text}</div>)}
     {items.filter(({ track, asset }) => track.kind === 'audio' && (asset.kind === 'audio' || asset.kind === 'video')).map(({ clip, asset }) => {
       const url = mediaUrls[asset.id];
       return url ? <audio key={clip.id} ref={(element) => onMediaElement(clip.id, element)} src={url} preload="auto" onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/> : null;
@@ -114,6 +129,7 @@ export default function App() {
   const [previewMuted, setPreviewMuted] = useState(false);
   const [canvasZoom, setCanvasZoom] = useState(1);
   const [timelineZoom, setTimelineZoom] = useState(1);
+  const [timelineSnapEnabled, setTimelineSnapEnabled] = useState(true);
   const [notice, setNotice] = useState('');
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({});
   const [audioWaveforms, setAudioWaveforms] = useState<Record<string, AudioWaveform | null>>({});
@@ -128,6 +144,7 @@ export default function App() {
   const [addingCloudMediaId, setAddingCloudMediaId] = useState('');
   const [selectedImageLayerId, setSelectedImageLayerId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedTextOverlayId, setSelectedTextOverlayId] = useState<string | null>(null);
   const [trackManagerOpen, setTrackManagerOpen] = useState(false);
   const [trackNames, setTrackNames] = useState<Record<string, string>>({});
   const [accountOpen, setAccountOpen] = useState(false);
@@ -184,6 +201,7 @@ export default function App() {
   const redoStack = useRef<ProjectDocument[]>([]);
   const timelineDrag = useRef<TimelineDrag | null>(null);
   const imageLayerDrag = useRef<ImageLayerDrag | null>(null);
+  const imageLayerResize = useRef<ImageLayerResize | null>(null);
   const exportAbort = useRef<AbortController | null>(null);
   const cloudProjectRevisionRef = useRef<number | null>(cloudProjectRevision);
   const lastSyncedCloudDocumentRef = useRef<{ id: string; document: string } | null>(null);
@@ -264,10 +282,20 @@ export default function App() {
           (asset.kind === 'audio' && targetTrack.kind === 'audio'));
       let updated: TimelineClip;
       if (drag.mode === 'move') {
+        let start = Math.max(0, Math.round((clip.start + delta) * drag.fps) / drag.fps);
+        if (drag.snapEnabled) {
+          let closest = drag.snapTolerance;
+          for (const point of drag.snapPoints) {
+            const startDistance = Math.abs(point - start);
+            const endDistance = Math.abs(point - (start + clip.duration));
+            if (startDistance <= closest) { closest = startDistance; start = Math.max(0, Math.round(point * drag.fps) / drag.fps); }
+            if (endDistance <= closest) { closest = endDistance; start = Math.max(0, Math.round((point - clip.duration) * drag.fps) / drag.fps); }
+          }
+        }
         updated = {
           ...clip,
           trackId: canMoveToTrack ? targetTrack.id : clip.trackId,
-          start: Math.max(0, Math.round((clip.start + delta) * drag.fps) / drag.fps),
+          start,
         };
       } else if (drag.mode === 'trim-start') {
         const speed = clip.speed ?? 1;
@@ -544,10 +572,28 @@ export default function App() {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); }
       else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveDraft(); }
-      else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') { event.preventDefault(); duplicateSelectedClip(); }
+      else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') {
+        event.preventDefault();
+        if (activeTool === 'image' && selectedImageLayerId) duplicateImageLayer(selectedImageLayerId);
+        else if ((activeTool === 'text' || activeTool === 'captions') && selectedTextOverlayId) duplicateTextOverlay(selectedTextOverlayId);
+        else duplicateSelectedClip();
+      }
+      else if (activeTool === 'image' && selectedImageLayerId && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)
+        && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) {
+        const layer = project.imageLayers.find((item) => item.id === selectedImageLayerId);
+        if (!layer || layer.locked) return;
+        event.preventDefault();
+        const step = event.shiftKey ? 1 : 0.1;
+        const [dx, dy] = event.key === 'ArrowLeft' ? [-step, 0] : event.key === 'ArrowRight' ? [step, 0] : event.key === 'ArrowUp' ? [0, -step] : [0, step];
+        updateImageLayer(layer.id, { x: layer.x + dx, y: layer.y + dy });
+      }
       else if (event.code === 'Space' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) { event.preventDefault(); togglePlayback(); }
       else if (event.key.toLowerCase() === 's' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) splitSelectedClip();
-      else if ((event.key === 'Delete' || event.key === 'Backspace') && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) deleteSelectedClip();
+      else if ((event.key === 'Delete' || event.key === 'Backspace') && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) {
+        if (activeTool === 'image' && selectedImageLayerId) deleteImageLayer(selectedImageLayerId);
+        else if ((activeTool === 'text' || activeTool === 'captions') && selectedTextOverlayId) removeTextOverlay(selectedTextOverlayId);
+        else deleteSelectedClip();
+      }
     };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
   });
@@ -572,8 +618,8 @@ export default function App() {
       const nextId = id || (inFlight.localProjectId === document.project.id ? completed.id : '');
       return persistCloudProject(document, nextId, expectedOverride);
     }
-    const expectedRevision = id ? expectedOverride ?? cloudProjectRevisionRef.current : undefined;
-    if (id && expectedRevision == null) throw new ApiError('The saved project revision is unknown. Reload the account copy or explicitly keep this local version.', 409, 'project_conflict');
+    const expectedRevision = id ? expectedOverride ?? cloudProjectRevisionRef.current ?? undefined : undefined;
+    if (id && expectedRevision === undefined) throw new ApiError('The saved project revision is unknown. Reload the account copy or explicitly keep this local version.', 409, 'project_conflict');
     const promise = saveCloudProject(document.project.name, document, id || undefined, expectedRevision);
     cloudSaveInFlightRef.current = { key, localProjectId: document.project.id, promise };
     try {
@@ -652,6 +698,40 @@ export default function App() {
     imageLayerDrag.current = null;
     if (drag.changed) {
       undoStack.current.push(drag.originalProject);
+      redoStack.current = [];
+    }
+  }
+  function beginImageLayerResize(event: ReactPointerEvent<HTMLButtonElement>, layer: ImageLayer) {
+    if (layer.locked) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+    const centerX = bounds.left + bounds.width / 2;
+    const centerY = bounds.top + bounds.height / 2;
+    const startDistance = Math.hypot(event.clientX - centerX, event.clientY - centerY);
+    if (startDistance <= 0) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setSelectedImageLayerId(layer.id);
+    setSelectedAssetId(layer.assetId);
+    imageLayerResize.current = { layerId: layer.id, centerX, centerY, startDistance, originalScale: layer.scale, originalProject: project, changed: false };
+  }
+  function moveImageLayerResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = imageLayerResize.current;
+    if (!resize) return;
+    event.preventDefault();
+    const distance = Math.hypot(event.clientX - resize.centerX, event.clientY - resize.centerY);
+    const scale = Math.max(0.1, Math.min(5, resize.originalScale * distance / resize.startDistance));
+    resize.changed ||= Math.abs(scale - resize.originalScale) > 0.001;
+    setProject({ ...resize.originalProject, imageLayers: resize.originalProject.imageLayers.map((layer) => layer.id === resize.layerId ? { ...layer, scale } : layer) });
+    setSaved(false);
+  }
+  function finishImageLayerResize() {
+    const resize = imageLayerResize.current;
+    if (!resize) return;
+    imageLayerResize.current = null;
+    if (resize.changed) {
+      undoStack.current.push(resize.originalProject);
       redoStack.current = [];
     }
   }
@@ -814,15 +894,25 @@ export default function App() {
   function addTextOverlays(overlays: TextOverlay[]) {
     if (!overlays.length) return;
     commit({ ...project, textOverlays: [...project.textOverlays, ...overlays] });
+    setSelectedTextOverlayId(overlays[0].id);
     setPreviewMode('timeline');
     setPlayhead(overlays[0].start);
     setNotice(`${overlays.length} ${overlays[0].kind === 'caption' ? 'caption' : 'title'}${overlays.length === 1 ? '' : 's'} added.`);
+  }
+  function duplicateTextOverlay(overlayId: string) {
+    const overlay = project.textOverlays.find((item) => item.id === overlayId);
+    if (!overlay) return;
+    const duplicate = { ...overlay, id: crypto.randomUUID(), start: overlay.start + overlay.duration };
+    commit({ ...project, textOverlays: [...project.textOverlays, duplicate] });
+    setSelectedTextOverlayId(duplicate.id);
   }
   function updateTextOverlay(updated: TextOverlay) {
     commit({ ...project, textOverlays: project.textOverlays.map((overlay) => overlay.id === updated.id ? updated : overlay) });
   }
   function removeTextOverlay(id: string) {
+    if (!project.textOverlays.some((overlay) => overlay.id === id)) return;
     commit({ ...project, textOverlays: project.textOverlays.filter((overlay) => overlay.id !== id) });
+    if (selectedTextOverlayId === id) setSelectedTextOverlayId(null);
   }
   function updateTransition(field: 'transitionIn' | 'transitionOut', value: number) {
     if (!selectedClip) return;
@@ -891,6 +981,9 @@ export default function App() {
       originalClip: clip,
       originalProject: project,
       changed: false,
+      snapPoints: [...project.clips.filter((item) => item.id !== clip.id).flatMap((item) => [item.start, item.start + item.duration]), playhead],
+      snapTolerance: duration / bounds.width * 9,
+      snapEnabled: timelineSnapEnabled,
     };
   }
   async function importFiles(files: FileList | null) {
@@ -1422,7 +1515,7 @@ export default function App() {
                     : <div className="cloud-library-empty"><Cloud size={18}/><strong>No account media yet</strong><p>Import files while signed in to store them with your account.</p></div>}
           </div>}
         </> : activeTool === 'image' ? <div className="image-studio-panel">
-          <div className="effects-intro"><span className="eyebrow">EDITABLE COMPOSITION</span><p>Image layers stay separate in the project. Reorder, hide, transform, and blend them on the canvas.</p></div>
+          <div className="effects-intro"><span className="eyebrow">EDITABLE COMPOSITION</span><p>Image layers stay separate in the project. Reorder, hide, transform, and blend them on the canvas. Select a layer, then use arrow keys to nudge it; hold Shift for larger steps.</p></div>
           <div className="image-layer-toolbar"><strong>Layers · {project.imageLayers.length}</strong><button className="tool-chip" disabled={!selectedImageLayer} onClick={() => selectedImageLayer && duplicateImageLayer(selectedImageLayer.id)}><Copy size={13}/>Duplicate</button></div>
           {!project.imageLayers.length ? <div className="effects-empty">Import an image from Media to start a layered composition.</div> : <div className="image-layer-list">
             {[...project.imageLayers].reverse().map((layer) => <div key={layer.id} className={`image-layer-row ${layer.id === selectedImageLayerId ? 'selected' : ''}`}>
@@ -1526,13 +1619,13 @@ export default function App() {
           <div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/>
           <div className="canvas-frame" style={{ aspectRatio: `${project.canvas.width} / ${project.canvas.height}`, transform: `scale(${canvasZoom})` }}>
             <div className="canvas-gradient" style={{ background: project.canvas.background }}>
-              {activeTool === 'image' ? <div className="image-composition" aria-label="Layered image composition">{project.imageLayers.map((layer, index) => {
+              {activeTool === 'image' ? <div className="image-composition" aria-label="Layered image composition" onPointerMove={moveImageLayerResize} onPointerUp={finishImageLayerResize} onPointerCancel={finishImageLayerResize}>{project.imageLayers.map((layer, index) => {
                 const asset = project.assets.find((item) => item.id === layer.assetId);
                 const url = mediaUrls[layer.assetId];
                 if (!layer.visible || !asset || !url) return null;
                 const style = effectStyle(project.effects, asset.id, project.colorAdjustments[asset.id]);
                 return <img key={layer.id} alt={layer.name} src={url} draggable={false} onPointerDown={(event) => beginImageLayerDrag(event, layer)} onPointerMove={moveImageLayer} onPointerUp={finishImageLayerDrag} onPointerCancel={finishImageLayerDrag} style={{ zIndex: index, opacity: layer.opacity, mixBlendMode: layer.blendMode, filter: style.filter, clipPath: `inset(${layer.cropTop * 100}% ${layer.cropRight * 100}% ${layer.cropBottom * 100}% ${layer.cropLeft * 100}%)`, transform: `translate(${layer.x}%, ${layer.y}%) rotate(${layer.rotation}deg) scale(${layer.scale})`, cursor: layer.locked ? 'default' : 'grab', touchAction: 'none' }} />;
-              })}</div> : previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} colorAdjustments={project.colorAdjustments} overlays={project.textOverlays} playhead={playhead} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
+              })}{selectedImageLayer && selectedImageLayer.visible && !selectedImageLayer.locked && <div className="image-transform-box" role="group" aria-label={`Resize ${selectedImageLayer.name}`} style={{ transform: `translate(${selectedImageLayer.x}%, ${selectedImageLayer.y}%) rotate(${selectedImageLayer.rotation}deg) scale(${selectedImageLayer.scale})` }}><button type="button" className="image-transform-handle nw" aria-label="Resize layer from top left" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/><button type="button" className="image-transform-handle ne" aria-label="Resize layer from top right" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/><button type="button" className="image-transform-handle sw" aria-label="Resize layer from bottom left" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/><button type="button" className="image-transform-handle se" aria-label="Resize layer from bottom right" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/></div>}</div> : previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} colorAdjustments={project.colorAdjustments} overlays={project.textOverlays} playhead={playhead} selectedOverlayId={selectedTextOverlayId} onSelectOverlay={setSelectedTextOverlayId} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
                 {selectedAsset.kind === 'video' ? <video src={mediaUrls[selectedAsset.id]} style={{ filter: previewEffect.filter }} playsInline controls/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name} style={{ filter: previewEffect.filter }}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls/></div>}
                 {selectedAsset.kind !== 'audio' && previewEffect.vignette > 0 && <div className="preview-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${previewEffect.vignette * 0.78}) 100%)` }}/>}
               </div> : <><div className="canvas-glow one"/><div className="canvas-glow two"/><div className="canvas-center"><div className="center-mark"><Clapperboard size={21}/></div><span className="canvas-overline">{selectedAsset ? 'MEDIA PREVIEW' : 'YOUR NEXT STORY'}</span><strong>{selectedAsset ? selectedAsset.name : <>Make room<br/>for the <em>moment.</em></>}</strong><span className="canvas-caption">{selectedAsset ? loadingAssetId === selectedAsset.id ? 'Restoring media…' : 'Media preview is unavailable on this device.' : 'A new canvas is a blank invitation.'}</span></div></>}
@@ -1544,7 +1637,7 @@ export default function App() {
         </div>
         <div className="transport"><div className="transport-left"><button className="icon-button" title="Go to start" aria-label="Go to start" onClick={() => { setPlaying(false); setPreviewMode('timeline'); setPlayhead(0); }}><span className="skip-start">|◀</span></button><button className="play-button" title="Play / pause · Space" aria-label="Play / pause · Space" onClick={togglePlayback}>{playing ? <Pause size={16} fill="currentColor"/> : <Play size={16} fill="currentColor"/>}</button><button className="icon-button" title="Step forward" aria-label="Step forward" onClick={() => { setPlaying(false); setPreviewMode('timeline'); setPlayhead((time) => Math.min(sequenceDuration, time + 1 / project.canvas.fps)); }}><span className="skip-next">▶|</span></button><span className="transport-time"><strong>{formatTime(playhead)}</strong><span> / {formatTime(sequenceDuration || duration)}</span></span></div><div className="transport-right"><button className="icon-button" title={previewMuted ? 'Unmute preview' : 'Mute preview'} aria-label={previewMuted ? 'Unmute preview' : 'Mute preview'} aria-pressed={previewMuted} onClick={() => setPreviewMuted((muted) => !muted)}><Volume2 size={15} opacity={previewMuted ? .45 : 1}/></button><span className="toolbar-separator"/><button className="icon-button" title="Playback quality"><Gauge size={15}/></button><button className="quality-label">Full quality <ChevronDown size={12}/></button></div></div>
         <section className="timeline">
-          <div className="timeline-header"><div className="timeline-title"><span className="eyebrow">SEQUENCE</span><strong>Timeline</strong><span className="timeline-pill">{project.tracks.length} tracks</span></div><div className="timeline-actions">{selectedClip && <><button className="tool-chip" onClick={splitSelectedClip}><Scissors size={14}/>Split</button><button className="icon-button tiny" title="Duplicate clip · Ctrl D" onClick={duplicateSelectedClip}><Copy size={14}/></button><button className="icon-button tiny" title="Delete clip" onClick={deleteSelectedClip}><Trash2 size={14}/></button></>}<button className="icon-button tiny" title="Timeline settings"><Settings2 size={15}/></button><span className="toolbar-separator"/><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.max(0.5, value - 0.1))} title="Zoom out timeline"><ZoomOut size={15}/></button><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.min(1.5, value + 0.1))} title="Zoom in timeline"><ZoomIn size={15}/></button></div></div>
+          <div className="timeline-header"><div className="timeline-title"><span className="eyebrow">SEQUENCE</span><strong>Timeline</strong><span className="timeline-pill">{project.tracks.length} tracks</span></div><div className="timeline-actions">{selectedClip && <><button className="tool-chip" onClick={splitSelectedClip}><Scissors size={14}/>Split</button><button className="icon-button tiny" title="Duplicate clip · Ctrl D" onClick={duplicateSelectedClip}><Copy size={14}/></button><button className="icon-button tiny" title="Delete clip" onClick={deleteSelectedClip}><Trash2 size={14}/></button></>}<button className={`tool-chip ${timelineSnapEnabled ? 'selected' : ''}`} aria-pressed={timelineSnapEnabled} title="Snap clips to nearby clip edges and playhead" onClick={() => setTimelineSnapEnabled((enabled) => !enabled)}><Magnet size={14}/>Snap</button><button className="icon-button tiny" title="Timeline settings"><Settings2 size={15}/></button><span className="toolbar-separator"/><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.max(0.5, value - 0.1))} title="Zoom out timeline"><ZoomOut size={15}/></button><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.min(1.5, value + 0.1))} title="Zoom in timeline"><ZoomIn size={15}/></button></div></div>
           <div className="track-type-actions" aria-label="Add track">
             <button onClick={() => addTrack('video')}><Film size={13}/>Add video track</button>
             <button onClick={() => addTrack('audio')}><Music2 size={13}/>Add audio track</button>

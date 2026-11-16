@@ -143,7 +143,7 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
 
   const shownOverlays = overlays.filter((overlay) => overlay.kind === (isCaption ? 'caption' : 'title'));
   return <div className="creative-panel">
-    <div className="creative-intro"><span className="eyebrow">{isCaption ? 'SUBTITLES' : 'TEXT LAYERS'}</span><p>{isCaption ? 'Write captions or import/export timed SRT and WebVTT subtitles.' : 'Add timed titles to the text layer and style them on the canvas.'}</p></div>
+    <div className="creative-intro"><span className="eyebrow">{isCaption ? 'SUBTITLES' : 'TEXT LAYERS'}</span><p>{isCaption ? 'Write captions or import/export timed SRT and WebVTT subtitles. Select a visible caption in the preview to duplicate or delete it with Ctrl/Cmd+D or Delete.' : 'Add timed titles and style them on the canvas. Select a visible title in the preview to duplicate or delete it with Ctrl/Cmd+D or Delete.'}</p></div>
     {isCaption && <div className="subtitle-import">
       <input ref={fileInput} type="file" accept=".srt,.vtt,application/x-subrip,text/vtt,text/plain" hidden onChange={(event) => void importSubtitles(event.target.files?.[0])}/>
       <button className="creative-secondary" onClick={() => fileInput.current?.click()}><FileUp size={14}/>Import .srt or .vtt</button>

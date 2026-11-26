@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Eye, EyeOff, Film, FolderOpen, Frame, Gauge, Image, Layers3, Lock, LockKeyhole, Magnet, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Pencil, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Unlock, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
-import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type ImageLayer, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
+import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, layerType, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, textOverlayAnimationAt, type ClipKeyframe, type ImageLayer, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
 import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
 import { audioGainAt, renderEditedImage, renderProjectVideo } from './export';
 import { ApiError, authenticate, createCloudProjectVersion, deleteCloudMedia, deleteCloudProject, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudMedia, listCloudProjectVersions, listCloudProjects, restoreCloudProjectVersion, saveCloudProject, uploadCloudMedia, type CloudMedia, type CloudProject, type CloudProjectVersion } from './api';
 import { readMedia, storeMedia } from './mediaStore';
 import { decodeAudioWaveform, waveformPeaksForClip, type AudioWaveform } from './waveform';
 import { CreativeToolsPanel } from './CreativeToolsPanel';
+import { ServerExportPanel } from './ServerExportPanel';
 import { AdminPanel, OrganizationRequestForm, SupportTicketForm } from './AdminPanel';
 import './export.css';
 
@@ -93,7 +94,7 @@ function TimelineComposition({ items, mediaUrls, effects, colorAdjustments, over
       </div>;
     })}
     {!visuals.length && <div className="timeline-composition-empty">No visual clip at this time</div>}
-    {overlays.filter((overlay) => playhead >= overlay.start && playhead < overlay.start + overlay.duration).map((overlay) => <div key={overlay.id} className={`timeline-text-overlay ${overlay.kind} position-${overlay.position} ${selectedOverlayId === overlay.id ? 'overlay-selected' : ''}`} onClick={(event) => { event.stopPropagation(); onSelectOverlay(overlay.id); }} style={{ color: overlay.color, fontSize: `${Math.max(12, overlay.fontSize * 0.28)}px`, fontFamily: overlay.fontFamily ?? 'Manrope', fontWeight: overlay.fontWeight ?? 'bold', fontStyle: overlay.italic ? 'italic' : 'normal', textAlign: overlay.align ?? 'center', WebkitTextStroke: `${overlay.outlineWidth ?? 0}px ${overlay.outlineColor ?? '#111111'}` }}>{overlay.text}</div>)}
+    {overlays.filter((overlay) => playhead >= overlay.start && playhead < overlay.start + overlay.duration).map((overlay) => <div key={overlay.id} className={`timeline-text-overlay ${overlay.kind} position-${overlay.position} ${selectedOverlayId === overlay.id ? 'overlay-selected' : ''}`} onClick={(event) => { event.stopPropagation(); onSelectOverlay(overlay.id); }} style={{ opacity: textOverlayAnimationAt(overlay, playhead).opacity, translate: `0 ${textOverlayAnimationAt(overlay, playhead).offsetY * 100}cqh`, scale: String(textOverlayAnimationAt(overlay, playhead).scale), color: overlay.color, fontSize: `${Math.max(12, overlay.fontSize * 0.28)}px`, fontFamily: overlay.fontFamily ?? 'Manrope', fontWeight: overlay.fontWeight ?? 'bold', fontStyle: overlay.italic ? 'italic' : 'normal', textAlign: overlay.align ?? 'center', WebkitTextStroke: `${overlay.outlineWidth ?? 0}px ${overlay.outlineColor ?? '#111111'}` }}>{overlay.text}</div>)}
     {items.filter(({ track, asset }) => track.kind === 'audio' && (asset.kind === 'audio' || asset.kind === 'video')).map(({ clip, asset }) => {
       const url = mediaUrls[asset.id];
       return url ? <audio key={clip.id} ref={(element) => onMediaElement(clip.id, element)} src={url} preload="auto" onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/> : null;
@@ -413,6 +414,23 @@ export default function App() {
     }
   }, [activeTimelineItems, playhead]);
 
+  const latestProjectRef = useRef(project);
+  latestProjectRef.current = project;
+  useEffect(() => {
+    // The autosave below is debounced; flush it when the tab is hidden or reloaded so recent edits are never lost.
+    const flush = () => {
+      try {
+        const serialized = JSON.stringify(latestProjectRef.current);
+        localStorage.setItem('frameforge:last-project', serialized);
+        localStorage.setItem(`frameforge:${latestProjectRef.current.project.id}`, serialized);
+      } catch { /* storage full or unavailable; the debounced autosave reports nothing either */ }
+    };
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flush(); };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { window.removeEventListener('pagehide', flush); document.removeEventListener('visibilitychange', onVisibility); };
+  }, []);
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       localStorage.setItem('frameforge:last-project', JSON.stringify(project));
@@ -665,24 +683,34 @@ export default function App() {
     commit({ ...project, imageLayers: [...project.imageLayers.slice(0, index + 1), duplicate, ...project.imageLayers.slice(index + 1)] });
     setSelectedImageLayerId(duplicate.id);
   }
+  function addVectorLayer(type: 'text' | 'shape') {
+    const count = project.imageLayers.filter((layer) => layerType(layer) === type).length + 1;
+    const base = { id: crypto.randomUUID(), visible: true, locked: false, opacity: 1, blendMode: 'normal' as const, mask: 'none' as const, x: 0, y: 0, scale: 1, rotation: 0, cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 };
+    const layer: ImageLayer = type === 'text'
+      ? { ...base, type, name: `Text ${count}`, text: 'Your headline', fontSize: Math.round(project.canvas.width / 10), color: '#ffffff', fontFamily: 'Manrope', fontWeight: 'bold', align: 'center' }
+      : { ...base, type, name: `Shape ${count}`, shape: 'rectangle', fill: '#ad7dff', stroke: '#ffffff', strokeWidth: 0, width: 40, height: 25 };
+    commit({ ...project, imageLayers: [...project.imageLayers, layer] });
+    setSelectedImageLayerId(layer.id);
+    setNotice(`${layer.name} added to the image composition.`);
+  }
   function deleteImageLayer(layerId: string) {
     commit({ ...project, imageLayers: project.imageLayers.filter((layer) => layer.id !== layerId) });
     if (selectedImageLayerId === layerId) setSelectedImageLayerId(null);
   }
-  function beginImageLayerDrag(event: ReactPointerEvent<HTMLImageElement>, layer: ImageLayer) {
+  function beginImageLayerDrag(event: ReactPointerEvent<Element>, layer: ImageLayer) {
     if (layer.locked) return;
     event.preventDefault();
     const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
     if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setSelectedImageLayerId(layer.id);
-    setSelectedAssetId(layer.assetId);
+    if (layer.assetId) setSelectedAssetId(layer.assetId);
     imageLayerDrag.current = {
       layerId: layer.id, startX: event.clientX, startY: event.clientY, width: bounds.width, height: bounds.height,
       originalX: layer.x, originalY: layer.y, originalProject: project, changed: false,
     };
   }
-  function moveImageLayer(event: ReactPointerEvent<HTMLImageElement>) {
+  function moveImageLayer(event: ReactPointerEvent<Element>) {
     const drag = imageLayerDrag.current;
     if (!drag) return;
     event.preventDefault();
@@ -713,7 +741,7 @@ export default function App() {
     if (startDistance <= 0) return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setSelectedImageLayerId(layer.id);
-    setSelectedAssetId(layer.assetId);
+    if (layer.assetId) setSelectedAssetId(layer.assetId);
     imageLayerResize.current = { layerId: layer.id, centerX, centerY, startDistance, originalScale: layer.scale, originalProject: project, changed: false };
   }
   function moveImageLayerResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1091,7 +1119,10 @@ export default function App() {
     commit({ ...project, clips: [...project.clips, clip] }); setSelectedAssetId(assetId); setSelectedClipId(clip.id); setPreviewMode('timeline'); setPlayhead(clip.start); setNotice(`${asset.name} added to ${track.name}.`);
   }
   async function saveDraft() {
-    localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project)); setSaved(true);
+    const serialized = JSON.stringify(project);
+    localStorage.setItem(`frameforge:${project.project.id}`, serialized);
+    localStorage.setItem('frameforge:last-project', serialized);
+    setSaved(true);
     if (sessionStorage.getItem('frameforge:access-token')) {
       try { await persistCloudProject(project); setCloudConflict(''); setNotice('Draft and uploaded media references saved on this device and to your account. Local-only media remains on this device.'); }
       catch (error) { if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message); else setNotice(`Saved on this device. Cloud save failed: ${(error as Error).message}`); }
@@ -1517,9 +1548,10 @@ export default function App() {
         </> : activeTool === 'image' ? <div className="image-studio-panel">
           <div className="effects-intro"><span className="eyebrow">EDITABLE COMPOSITION</span><p>Image layers stay separate in the project. Reorder, hide, transform, and blend them on the canvas. Select a layer, then use arrow keys to nudge it; hold Shift for larger steps.</p></div>
           <div className="image-layer-toolbar"><strong>Layers · {project.imageLayers.length}</strong><button className="tool-chip" disabled={!selectedImageLayer} onClick={() => selectedImageLayer && duplicateImageLayer(selectedImageLayer.id)}><Copy size={13}/>Duplicate</button></div>
-          {!project.imageLayers.length ? <div className="effects-empty">Import an image from Media to start a layered composition.</div> : <div className="image-layer-list">
+          <div className="image-layer-add"><button className="tool-chip" onClick={() => fileRef.current?.click()}><Image size={13}/>Add image</button><button className="tool-chip" onClick={() => addVectorLayer('text')}><Type size={13}/>Add text</button><button className="tool-chip" onClick={() => addVectorLayer('shape')}><Shapes size={13}/>Add shape</button></div>
+          {!project.imageLayers.length ? <div className="effects-empty">Import an image, or add a text or shape layer, to start a layered composition.</div> : <div className="image-layer-list">
             {[...project.imageLayers].reverse().map((layer) => <div key={layer.id} className={`image-layer-row ${layer.id === selectedImageLayerId ? 'selected' : ''}`}>
-              <button className="image-layer-select" onClick={() => { setSelectedImageLayerId(layer.id); setSelectedAssetId(layer.assetId); setPreviewMode('asset'); }}><span className="image-layer-thumb"><Image size={14}/></span><span><strong>{layer.name}</strong><small>{project.assets.find((asset) => asset.id === layer.assetId)?.name ?? 'Missing image'}</small></span></button>
+              <button className="image-layer-select" onClick={() => { setSelectedImageLayerId(layer.id); if (layer.assetId) setSelectedAssetId(layer.assetId); setPreviewMode('asset'); }}><span className="image-layer-thumb">{layerType(layer) === 'text' ? <Type size={14}/> : layerType(layer) === 'shape' ? <Shapes size={14}/> : <Image size={14}/>}</span><span><strong>{layer.name}</strong><small>{layerType(layer) === 'text' ? `Text · ${layer.text?.split('\n')[0] ?? ''}` : layerType(layer) === 'shape' ? `Shape · ${layer.shape}` : project.assets.find((asset) => asset.id === layer.assetId)?.name ?? 'Missing image'}</small></span></button>
               <button className="image-layer-icon" aria-label={`${layer.visible ? 'Hide' : 'Show'} ${layer.name}`} onClick={() => updateImageLayer(layer.id, { visible: !layer.visible })}>{layer.visible ? <Eye size={14}/> : <EyeOff size={14}/>}</button>
               <button className="image-layer-icon" aria-label={`${layer.locked ? 'Unlock' : 'Lock'} ${layer.name}`} onClick={() => updateImageLayer(layer.id, { locked: !layer.locked })}>{layer.locked ? <Lock size={14}/> : <Unlock size={14}/>}</button>
               <button className="image-layer-icon" aria-label={`Move ${layer.name} up`} onClick={() => reorderImageLayer(layer.id, 1)}><ArrowUp size={14}/></button>
@@ -1530,6 +1562,25 @@ export default function App() {
           {selectedImageLayer && <section className="image-layer-properties">
             <header><span>SELECTED LAYER</span><small>{selectedImageLayer.locked ? 'Locked' : 'Editable'}</small></header>
             <label className="image-layer-field">Layer name<input aria-label="Layer name" value={selectedImageLayer.name} onChange={(event) => updateImageLayer(selectedImageLayer.id, { name: event.target.value })}/></label>
+            {layerType(selectedImageLayer) === 'text' && <>
+              <label className="image-layer-field">Text<textarea aria-label="Layer text" rows={2} value={selectedImageLayer.text ?? ''} disabled={selectedImageLayer.locked} onChange={(event) => { if (event.target.value.trim()) updateImageLayer(selectedImageLayer.id, { text: event.target.value }); }}/></label>
+              <div className="visual-transform-grid">
+                <label>Font size (px)<input aria-label="Layer font size" type="number" min="8" max="1000" value={selectedImageLayer.fontSize ?? 96} disabled={selectedImageLayer.locked} onChange={(event) => { const value = event.currentTarget.valueAsNumber; if (value >= 8 && value <= 1000) updateImageLayer(selectedImageLayer.id, { fontSize: value }); }}/></label>
+                <label>Color<input aria-label="Layer text color" type="color" value={selectedImageLayer.color ?? '#ffffff'} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { color: event.target.value })}/></label>
+                <label>Font<select aria-label="Layer font" value={selectedImageLayer.fontFamily ?? 'Manrope'} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { fontFamily: event.target.value as ImageLayer['fontFamily'] })}><option value="Manrope">Manrope</option><option value="Arial">Arial</option><option value="Georgia">Georgia</option></select></label>
+                <label>Weight<select aria-label="Layer font weight" value={selectedImageLayer.fontWeight ?? 'bold'} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { fontWeight: event.target.value as ImageLayer['fontWeight'] })}><option value="normal">Regular</option><option value="bold">Bold</option></select></label>
+                <label>Alignment<select aria-label="Layer text alignment" value={selectedImageLayer.align ?? 'center'} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { align: event.target.value as ImageLayer['align'] })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
+                <label>Italic<input aria-label="Layer italic" type="checkbox" checked={selectedImageLayer.italic ?? false} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { italic: event.target.checked })}/></label>
+              </div>
+            </>}
+            {layerType(selectedImageLayer) === 'shape' && <div className="visual-transform-grid">
+              <label>Shape<select aria-label="Layer shape" value={selectedImageLayer.shape ?? 'rectangle'} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { shape: event.target.value as ImageLayer['shape'] })}><option value="rectangle">Rectangle</option><option value="ellipse">Ellipse</option></select></label>
+              <label>Fill<input aria-label="Layer fill" type="color" value={selectedImageLayer.fill ?? '#ad7dff'} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { fill: event.target.value })}/></label>
+              <label>Width (%)<input aria-label="Layer shape width" type="number" min="1" max="100" value={selectedImageLayer.width ?? 40} disabled={selectedImageLayer.locked} onChange={(event) => { const value = event.currentTarget.valueAsNumber; if (value >= 1 && value <= 100) updateImageLayer(selectedImageLayer.id, { width: value }); }}/></label>
+              <label>Height (%)<input aria-label="Layer shape height" type="number" min="1" max="100" value={selectedImageLayer.height ?? 25} disabled={selectedImageLayer.locked} onChange={(event) => { const value = event.currentTarget.valueAsNumber; if (value >= 1 && value <= 100) updateImageLayer(selectedImageLayer.id, { height: value }); }}/></label>
+              <label>Stroke<input aria-label="Layer stroke color" type="color" value={selectedImageLayer.stroke ?? '#ffffff'} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { stroke: event.target.value })}/></label>
+              <label>Stroke width (px)<input aria-label="Layer stroke width" type="number" min="0" max="200" value={selectedImageLayer.strokeWidth ?? 0} disabled={selectedImageLayer.locked} onChange={(event) => { const value = event.currentTarget.valueAsNumber; if (value >= 0 && value <= 200) updateImageLayer(selectedImageLayer.id, { strokeWidth: value }); }}/></label>
+            </div>}
             <div className="visual-transform-grid">
               <label>Position X (%)<input aria-label="Layer X" type="number" value={selectedImageLayer.x} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { x: event.currentTarget.valueAsNumber || 0 })}/></label>
               <label>Position Y (%)<input aria-label="Layer Y" type="number" value={selectedImageLayer.y} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { y: event.currentTarget.valueAsNumber || 0 })}/></label>
@@ -1551,7 +1602,7 @@ export default function App() {
             <input id="clip-volume" aria-label="Clip volume" type="range" min="0" max="1" step="0.01" value={selectedClip.volume ?? 1} onChange={(event) => updateClipVolume(Number(event.target.value))}/>
             <label htmlFor="audio-clip-speed">Playback speed <output>{(selectedClip.speed ?? 1).toFixed(2)}×</output></label>
             <input id="audio-clip-speed" aria-label="Audio clip speed" type="range" min={MIN_CLIP_SPEED} max={MAX_CLIP_SPEED} step="0.05" value={selectedClip.speed ?? 1} onChange={(event) => updateClipSpeed(Number(event.target.value))}/>
-            <small>Changing audio speed also changes its pitch.</small>
+            <small>Speed changes keep the original pitch in preview and in exports.</small>
           </section> : <div className="effects-empty">Select a clip on an audio track to adjust its volume.</div>}
         </div> : activeTool === 'effects' ? <div className="effects-panel">
           {selectedClip && selectedClipTrack?.kind === 'video' && project.assets.find((asset) => asset.id === selectedClip.assetId)?.kind !== 'audio' && <section className="visual-clip-control">
@@ -1621,11 +1672,30 @@ export default function App() {
           <div className="canvas-frame" style={{ aspectRatio: `${project.canvas.width} / ${project.canvas.height}`, transform: `scale(${canvasZoom})` }}>
             <div className="canvas-gradient" style={{ background: project.canvas.background }}>
               {activeTool === 'image' ? <div className="image-composition" aria-label="Layered image composition" onPointerMove={moveImageLayerResize} onPointerUp={finishImageLayerResize} onPointerCancel={finishImageLayerResize}>{project.imageLayers.map((layer, index) => {
+                if (!layer.visible) return null;
+                const maskImage = layer.mask === 'ellipse' ? 'radial-gradient(ellipse, #000 69%, transparent 70%)' : undefined;
+                const layerStyle = { zIndex: index, opacity: layer.opacity, mixBlendMode: layer.blendMode, clipPath: `inset(${layer.cropTop * 100}% ${layer.cropRight * 100}% ${layer.cropBottom * 100}% ${layer.cropLeft * 100}%)`, maskImage, WebkitMaskImage: maskImage, transform: `translate(${layer.x}%, ${layer.y}%) rotate(${layer.rotation}deg) scale(${layer.scale})`, cursor: layer.locked ? 'default' : 'grab', touchAction: 'none' } as const;
+                const handlers = { onPointerDown: (event: ReactPointerEvent<Element>) => beginImageLayerDrag(event, layer), onPointerMove: moveImageLayer, onPointerUp: finishImageLayerDrag, onPointerCancel: finishImageLayerDrag };
+                if (layerType(layer) !== 'image') {
+                  const { width: cw, height: ch } = project.canvas;
+                  const lines = (layer.text ?? '').split('\n');
+                  const size = layer.fontSize ?? 96;
+                  const anchorX = layer.align === 'left' ? cw * 0.06 : layer.align === 'right' ? cw * 0.94 : cw / 2;
+                  const sw = cw * (layer.width ?? 50) / 100;
+                  const sh = ch * (layer.height ?? 30) / 100;
+                  return <svg key={layer.id} className="image-vector-layer" data-layer-id={layer.id} role="img" aria-label={layer.name} viewBox={`0 0 ${cw} ${ch}`} preserveAspectRatio="none" style={layerStyle}>
+                    {layerType(layer) === 'text'
+                      ? lines.map((line, lineIndex) => <text key={lineIndex} {...handlers} x={anchorX} y={ch / 2 - lines.length * size * 0.6 + size * 1.2 * (lineIndex + 0.5)} textAnchor={layer.align === 'left' ? 'start' : layer.align === 'right' ? 'end' : 'middle'} dominantBaseline="middle" fontSize={size} fontFamily={`${layer.fontFamily ?? 'Manrope'}, ${layer.fontFamily === 'Georgia' ? 'serif' : 'sans-serif'}`} fontWeight={layer.fontWeight ?? 'bold'} fontStyle={layer.italic ? 'italic' : 'normal'} fill={layer.color ?? '#ffffff'}>{line}</text>)
+                      : layer.shape === 'ellipse'
+                        ? <ellipse {...handlers} cx={cw / 2} cy={ch / 2} rx={sw / 2} ry={sh / 2} fill={layer.fill ?? '#ad7dff'} stroke={(layer.strokeWidth ?? 0) > 0 ? layer.stroke ?? '#ffffff' : 'none'} strokeWidth={layer.strokeWidth ?? 0}/>
+                        : <rect {...handlers} x={cw / 2 - sw / 2} y={ch / 2 - sh / 2} width={sw} height={sh} fill={layer.fill ?? '#ad7dff'} stroke={(layer.strokeWidth ?? 0) > 0 ? layer.stroke ?? '#ffffff' : 'none'} strokeWidth={layer.strokeWidth ?? 0}/>}
+                  </svg>;
+                }
                 const asset = project.assets.find((item) => item.id === layer.assetId);
-                const url = mediaUrls[layer.assetId];
-                if (!layer.visible || !asset || !url) return null;
+                const url = layer.assetId ? mediaUrls[layer.assetId] : undefined;
+                if (!asset || !url) return null;
                 const style = effectStyle(project.effects, asset.id, project.colorAdjustments[asset.id]);
-                return <img key={layer.id} alt={layer.name} src={url} draggable={false} onPointerDown={(event) => beginImageLayerDrag(event, layer)} onPointerMove={moveImageLayer} onPointerUp={finishImageLayerDrag} onPointerCancel={finishImageLayerDrag} style={{ zIndex: index, opacity: layer.opacity, mixBlendMode: layer.blendMode, filter: style.filter, clipPath: `inset(${layer.cropTop * 100}% ${layer.cropRight * 100}% ${layer.cropBottom * 100}% ${layer.cropLeft * 100}%)`, maskImage: layer.mask === 'ellipse' ? 'radial-gradient(ellipse, #000 69%, transparent 70%)' : undefined, WebkitMaskImage: layer.mask === 'ellipse' ? 'radial-gradient(ellipse, #000 69%, transparent 70%)' : undefined, transform: `translate(${layer.x}%, ${layer.y}%) rotate(${layer.rotation}deg) scale(${layer.scale})`, cursor: layer.locked ? 'default' : 'grab', touchAction: 'none' }} />;
+                return <img key={layer.id} alt={layer.name} src={url} draggable={false} {...handlers} style={{ ...layerStyle, filter: style.filter }} />;
               })}{selectedImageLayer && selectedImageLayer.visible && !selectedImageLayer.locked && <div className="image-transform-box" role="group" aria-label={`Resize ${selectedImageLayer.name}`} style={{ transform: `translate(${selectedImageLayer.x}%, ${selectedImageLayer.y}%) rotate(${selectedImageLayer.rotation}deg) scale(${selectedImageLayer.scale})` }}><button type="button" className="image-transform-handle nw" aria-label="Resize layer from top left" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/><button type="button" className="image-transform-handle ne" aria-label="Resize layer from top right" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/><button type="button" className="image-transform-handle sw" aria-label="Resize layer from bottom left" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/><button type="button" className="image-transform-handle se" aria-label="Resize layer from bottom right" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/></div>}</div> : previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} colorAdjustments={project.colorAdjustments} overlays={project.textOverlays} playhead={playhead} selectedOverlayId={selectedTextOverlayId} onSelectOverlay={setSelectedTextOverlayId} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
                 {selectedAsset.kind === 'video' ? <video src={mediaUrls[selectedAsset.id]} style={{ filter: previewEffect.filter }} playsInline controls/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name} style={{ filter: previewEffect.filter }}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls/></div>}
                 {selectedAsset.kind !== 'audio' && previewEffect.vignette > 0 && <div className="preview-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${previewEffect.vignette * 0.78}) 100%)` }}/>}
@@ -1698,13 +1768,14 @@ export default function App() {
     {exportOpen && <div className="export-backdrop" role="presentation" onMouseDown={(event) => { if (!exporting && event.target === event.currentTarget) setExportOpen(false); }}>
       <section className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title">
         <button className="modal-close" aria-label="Close export" disabled={exporting} onClick={() => setExportOpen(false)}>×</button>
-        <div className="modal-mark"><Download size={18}/></div><span className="eyebrow">LOCAL EXPORT</span><h2 id="export-title">Export your project</h2>
-        <p className="modal-description">Render the timeline to a WebM video in your browser, or download the editable project document.</p>
+        <div className="modal-mark"><Download size={18}/></div><span className="eyebrow">EXPORT</span><h2 id="export-title">Export your project</h2>
+        <p className="modal-description">Render the timeline in your browser (WebM), render MP4/WebM video, images, or audio on the server with FFmpeg, or download the editable project document.</p>
         <button className="modal-submit" onClick={() => void startVideoExport()} disabled={exporting}>{exporting ? `Rendering video · ${Math.round(exportProgress * 100)}%` : 'Render video (.webm)'}</button>
         <button className="modal-secondary" onClick={downloadProjectFile} disabled={exporting}>Download editable project (.frameforge.json)</button>
         {exporting && <div className="export-progress" aria-label="Export progress"><div><i style={{ width: `${Math.round(exportProgress * 100)}%` }}/></div><span>{Math.round(exportProgress * 100)}%</span><button className="modal-secondary" onClick={() => exportAbort.current?.abort()}>Cancel render</button></div>}
         {exportError && <p className="export-error" role="alert">{exportError}</p>}
-        <p className="export-note">WebM rendering runs in real time and includes timeline video, images, audio, text overlays, fades, and supported effects. AI generation requires an external provider and is not included.</p>
+        <ServerExportPanel project={project} signedIn={!!currentUser} cloudProjectId={cloudProjectId || undefined} selectedImageAssetId={selectedAsset?.kind === 'image' ? selectedAsset.id : undefined} saveToCloud={(document) => persistCloudProject(document)} onProjectChange={commit} onDownload={downloadExport}/>
+        <p className="export-note">Browser WebM rendering runs in real time and includes timeline video, images, audio, text overlays, fades, and supported effects. AI generation requires an external provider and is not included.</p>
       </section>
     </div>}
     {accountOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) { setAccountOpen(false); setOrganizationRequestOpen(false); setSupportTicketOpen(false); } }}><section className={`account-modal ${organizationRequestOpen || supportTicketOpen ? 'account-modal-request' : ''}`} role="dialog" aria-modal="true" aria-labelledby="account-title"><button className="modal-close" aria-label="Close" onClick={() => { setAccountOpen(false); setOrganizationRequestOpen(false); setSupportTicketOpen(false); }}>×</button><div className="modal-mark"><Clapperboard size={18}/></div><span className="eyebrow">FRAMEFORGE ACCOUNT</span><h2 id="account-title">{organizationRequestOpen ? 'Organisation request' : supportTicketOpen ? 'Contact support' : currentUser ? 'Your workspace' : authMode === 'login' ? 'Welcome back' : 'Create your account'}</h2>{currentUser ? organizationRequestOpen ? <OrganizationRequestForm/> : supportTicketOpen ? <SupportTicketForm/> : <><p className="modal-description">Signed in as <strong>{currentUser.email}</strong>. Your project can sync to your account.</p><button className="modal-submit" onClick={saveDraft}>Sync this project</button><button className="modal-secondary" onClick={() => setOrganizationRequestOpen(true)}>Request an organisation</button><button className="modal-secondary" onClick={() => setSupportTicketOpen(true)}>Contact support</button><button className="modal-secondary" onClick={signOut}>Sign out</button></> : <form onSubmit={submitAuth}><p className="modal-description">Sign in to sync your project. Your local draft stays on this device.</p><label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} required minLength={10} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 10 characters"/></label>{authError && <p className="auth-error" role="alert">{authError}</p>}<button className="modal-submit" disabled={authBusy}>{authBusy ? 'Connecting…' : authMode === 'login' ? 'Sign in and sync' : 'Create account'}</button><button type="button" className="modal-secondary" onClick={() => { setAuthError(''); setAuthMode(authMode === 'login' ? 'register' : 'login'); }}>{authMode === 'login' ? 'New to Frameforge? Create account' : 'Already have an account? Sign in'}</button></form>}</section></div>}

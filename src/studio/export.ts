@@ -155,6 +155,11 @@ async function renderImageComposition(project: ProjectDocument): Promise<Blob> {
       context.translate(canvas.width / 2 + layer.x * canvas.width / 100, canvas.height / 2 + layer.y * canvas.height / 100);
       context.rotate(layer.rotation * Math.PI / 180);
       context.scale(layer.scale, layer.scale);
+      if (layer.mask === 'ellipse') {
+        context.beginPath();
+        context.ellipse(0, 0, canvas.width / 2, canvas.height / 2, 0, 0, Math.PI * 2);
+        context.clip();
+      }
       context.beginPath();
       context.rect(
         canvas.width * (layer.cropLeft ?? 0),

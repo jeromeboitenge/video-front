@@ -40,3 +40,4 @@
 .timeline-text-overlay.position-top{top:12%}
 .timeline-text-overlay.position-center{top:50%;transform:translateY(-50%)}
 .timeline-text-overlay.position-bottom{bottom:12%}
+.timeline-text-overlay{pointer-events:auto;cursor:pointer}.timeline-text-overlay.overlay-selected{outline:1px solid #b49af5;outline-offset:2px}

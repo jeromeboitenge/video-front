@@ -698,6 +698,7 @@ describe('editor media and timeline flow', () => {
       },
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-02T00:00:00Z',
+      revision: 1,
     };
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -726,7 +727,7 @@ describe('editor media and timeline flow', () => {
     const remoteProject = {
       id: 'cloud-project-delete', name: 'Old campaign',
       document: { version: 1, project: { id: 'local-old', name: 'Old campaign' }, canvas: { width: 540, height: 960, fps: 30, background: '#151619' }, tracks: [], clips: [], assets: [], settings: {} },
-      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z', revision: 1,
     };
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -753,6 +754,7 @@ describe('editor media and timeline flow', () => {
     draft.project = { id: 'local-versioned', name: 'Versioned design' };
     localStorage.setItem('frameforge:last-project', JSON.stringify(draft));
     localStorage.setItem('frameforge:cloud-project:user-versions:local-versioned', 'cloud-versioned');
+    localStorage.setItem('frameforge:cloud-revision:user-versions:local-versioned', '1');
     const versionOne = { id: 'version-1', project_id: 'cloud-versioned', version_number: 1, name: 'Versioned design', created_at: '2026-01-01T00:00:00Z' };
     const versionTwo = { ...versionOne, id: 'version-2', version_number: 2, created_at: '2026-01-02T00:00:00Z' };
     const restoredDocument = {
@@ -761,7 +763,7 @@ describe('editor media and timeline flow', () => {
       assets: [{ id: 'snapshot-image', name: 'snapshot.png', kind: 'image', mimeType: 'image/png', size: 1, cloudId: 'snapshot-media' }],
       imageLayers: [{ id: 'snapshot-layer', assetId: 'snapshot-image', name: 'Snapshot layer', visible: true, locked: false, opacity: 1, blendMode: 'normal', x: 0, y: 0, scale: 1, rotation: 0, cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }],
     };
-    const restoredProject = { id: 'cloud-versioned', name: 'Snapshot design', document: restoredDocument, created_at: versionOne.created_at, updated_at: versionTwo.created_at };
+    const restoredProject = { id: 'cloud-versioned', name: 'Snapshot design', document: restoredDocument, created_at: versionOne.created_at, updated_at: versionTwo.created_at, revision: 2 };
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/auth/me')) return { ok: true, status: 200, json: async () => ({ id: 'user-versions', email: 'creator@example.com', is_admin: false }) } as Response;

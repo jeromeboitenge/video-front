@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Captions, FileUp, Plus, Sparkles, Trash2 } from 'lucide-react';
 import type { TextOverlay, TimelineClip, ToolId } from './model';
-import { parseSubRip, parseWebVtt, serializeWebVtt } from './subtitles';
+import { parseSubRip, parseWebVtt, serializeSubRip, serializeWebVtt } from './subtitles';
 
 type CreativeTool = Extract<ToolId, 'text' | 'captions' | 'transitions' | 'ai'>;
 
@@ -22,6 +22,7 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
   const [start, setStart] = useState(playhead.toFixed(1));
   const [duration, setDuration] = useState('3');
   const [position, setPosition] = useState<TextOverlay['position']>(isCaption ? 'bottom' : 'center');
+  const [align, setAlign] = useState<NonNullable<TextOverlay['align']>>('center');
   const [fontSize, setFontSize] = useState(isCaption ? '42' : '64');
   const [fontFamily, setFontFamily] = useState<NonNullable<TextOverlay['fontFamily']>>('Manrope');
   const [fontWeight, setFontWeight] = useState<NonNullable<TextOverlay['fontWeight']>>('bold');
@@ -37,6 +38,7 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
     setStart(playhead.toFixed(1));
     setDuration('3');
     setPosition(isCaption ? 'bottom' : 'center');
+    setAlign('center');
     setFontSize(isCaption ? '42' : '64');
     setFontFamily('Manrope');
     setFontWeight('bold');
@@ -68,6 +70,7 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
       start: startTime,
       duration: clipDuration,
       position,
+      align,
       fontSize: size,
       color,
       fontFamily,
@@ -97,13 +100,14 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
     }
   }
 
-  function exportSubtitles() {
+  function exportSubtitles(format: 'srt' | 'vtt') {
     try {
-      const contents = serializeWebVtt(shownOverlays);
-      const url = URL.createObjectURL(new Blob([contents], { type: 'text/vtt;charset=utf-8' }));
+      const contents = format === 'srt' ? serializeSubRip(shownOverlays) : serializeWebVtt(shownOverlays);
+      const mimeType = format === 'srt' ? 'application/x-subrip;charset=utf-8' : 'text/vtt;charset=utf-8';
+      const url = URL.createObjectURL(new Blob([contents], { type: mimeType }));
       const link = document.createElement('a');
       link.href = url;
-      link.download = 'captions.vtt';
+      link.download = `captions.${format}`;
       link.click();
       URL.revokeObjectURL(url);
     } catch (error) {
@@ -142,11 +146,11 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
 
   const shownOverlays = overlays.filter((overlay) => overlay.kind === (isCaption ? 'caption' : 'title'));
   return <div className="creative-panel">
-    <div className="creative-intro"><span className="eyebrow">{isCaption ? 'SUBTITLES' : 'TEXT LAYERS'}</span><p>{isCaption ? 'Write captions or import/export timed SRT and WebVTT subtitles.' : 'Add timed titles to the text layer and style them on the canvas.'}</p></div>
+    <div className="creative-intro"><span className="eyebrow">{isCaption ? 'SUBTITLES' : 'TEXT LAYERS'}</span><p>{isCaption ? 'Write captions or import/export timed SRT and WebVTT subtitles. Select a visible caption in the preview to duplicate or delete it with Ctrl/Cmd+D or Delete.' : 'Add timed titles and style them on the canvas. Select a visible title in the preview to duplicate or delete it with Ctrl/Cmd+D or Delete.'}</p></div>
     {isCaption && <div className="subtitle-import">
       <input ref={fileInput} type="file" accept=".srt,.vtt,application/x-subrip,text/vtt,text/plain" hidden onChange={(event) => void importSubtitles(event.target.files?.[0])}/>
       <button className="creative-secondary" onClick={() => fileInput.current?.click()}><FileUp size={14}/>Import .srt or .vtt</button>
-      {shownOverlays.length > 0 && <button className="creative-secondary" onClick={exportSubtitles}>Export .vtt</button>}
+      {shownOverlays.length > 0 && <><button className="creative-secondary" onClick={() => exportSubtitles('srt')}>Export .srt</button><button className="creative-secondary" onClick={() => exportSubtitles('vtt')}>Export .vtt</button></>}
       {fileError && <p className="creative-error" role="alert">{fileError}</p>}
     </div>}
     <form className="creative-form" onSubmit={addText}>
@@ -158,6 +162,10 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
       <div className="creative-form-row">
         <label>Position<select value={position} onChange={(event) => setPosition(event.target.value as TextOverlay['position'])}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
         <label>Size<input type="number" min="14" max="160" step="1" value={fontSize} onChange={(event) => setFontSize(event.target.value)} required/></label>
+      </div>
+      <div className="creative-form-row">
+        <label>Alignment<select aria-label="Text alignment" value={align} onChange={(event) => setAlign(event.target.value as NonNullable<TextOverlay['align']>)}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
+        <span />
       </div>
       <div className="creative-form-row">
         <label>Font<select value={fontFamily} onChange={(event) => setFontFamily(event.target.value as NonNullable<TextOverlay['fontFamily']>)}><option value="Manrope">Manrope</option><option value="Arial">Arial</option><option value="Georgia">Georgia</option></select></label>
@@ -193,8 +201,9 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
       </div>
       <div className="creative-form-row">
         <label>Position<select aria-label={`Position for ${overlay.text}`} value={overlay.position} onChange={(event) => onUpdateOverlay({ ...overlay, position: event.target.value as TextOverlay['position'] })}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
-        <label>Weight<select aria-label={`Weight for ${overlay.text}`} value={overlay.fontWeight ?? 'bold'} onChange={(event) => onUpdateOverlay({ ...overlay, fontWeight: event.target.value as NonNullable<TextOverlay['fontWeight']> })}><option value="normal">Regular</option><option value="bold">Bold</option></select></label>
+        <label>Alignment<select aria-label={`Alignment for ${overlay.text}`} value={overlay.align ?? 'center'} onChange={(event) => onUpdateOverlay({ ...overlay, align: event.target.value as NonNullable<TextOverlay['align']> })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
       </div>
+      <div className="creative-form-row"><label>Weight<select aria-label={`Weight for ${overlay.text}`} value={overlay.fontWeight ?? 'bold'} onChange={(event) => onUpdateOverlay({ ...overlay, fontWeight: event.target.value as NonNullable<TextOverlay['fontWeight']> })}><option value="normal">Regular</option><option value="bold">Bold</option></select></label><span /></div>
       <label className="creative-check"><input aria-label={`Italic for ${overlay.text}`} type="checkbox" checked={overlay.italic ?? false} onChange={(event) => onUpdateOverlay({ ...overlay, italic: event.target.checked })}/> Italic</label>
     </section>)}</div> : <div className="creative-empty">Nothing here yet. Add one above.</div>}
   </div>;

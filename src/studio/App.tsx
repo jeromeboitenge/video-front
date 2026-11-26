@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
-import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Eye, EyeOff, Film, FolderOpen, Frame, Gauge, Image, Layers3, Lock, LockKeyhole, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Pencil, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Unlock, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
+import { ArrowDown, ArrowUp, AudioLines, Building2, Captions, ChevronDown, CircleHelp, Clapperboard, Cloud, Command, Copy, Download, Eye, EyeOff, Film, FolderOpen, Frame, Gauge, Image, Layers3, Lock, LockKeyhole, Magnet, Maximize2, MoreHorizontal, Music2, PanelLeftClose, Pause, Pencil, Play, Plus, Redo2, Scissors, Settings2, Shapes, Sparkles, Square, Trash2, Type, Undo2, Unlock, Upload, Volume2, WandSparkles, ZoomIn, ZoomOut } from 'lucide-react';
 import { CANVAS_PRESETS, clipDurationAtSpeed, clipSourceTimeAt, clipTransformAt, clipTransformStyle, clipVisualOpacityAt, formatTime, FRAME_RATE_PRESETS, makeProject, MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, MAX_CLIP_SPEED, MIN_CLIP_SPEED, parseProjectDocument, type ClipKeyframe, type ImageLayer, type MediaAsset, type ProjectDocument, type TextOverlay, type TimelineClip, type ToolId, type Track } from './model';
 import { defaultColorAdjustment, effectRegistry, effectStyle, type AppliedEffect, type ColorAdjustment, type EffectId } from './effects';
 import { audioGainAt, renderEditedImage, renderProjectVideo } from './export';
-import { authenticate, createCloudProjectVersion, deleteCloudProject, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudProjectVersions, listCloudProjects, restoreCloudProjectVersion, saveCloudProject, uploadCloudMedia, type CloudProject, type CloudProjectVersion } from './api';
+import { ApiError, authenticate, createCloudProjectVersion, deleteCloudMedia, deleteCloudProject, getCloudMediaContent, getCloudProject, getCurrentUser, listCloudMedia, listCloudProjectVersions, listCloudProjects, restoreCloudProjectVersion, saveCloudProject, uploadCloudMedia, type CloudMedia, type CloudProject, type CloudProjectVersion } from './api';
 import { readMedia, storeMedia } from './mediaStore';
 import { decodeAudioWaveform, waveformPeaksForClip, type AudioWaveform } from './waveform';
 import { CreativeToolsPanel } from './CreativeToolsPanel';
@@ -16,6 +16,7 @@ const tools: { id: ToolId; label: string; icon: typeof Film }[] = [
   { id: 'transitions', label: 'Transitions', icon: Layers3 }, { id: 'ai', label: 'AI studio', icon: WandSparkles },
 ];
 const cloudProjectKey = (userId: string, localProjectId: string) => `frameforge:cloud-project:${userId}:${localProjectId}`;
+const cloudRevisionKey = (userId: string, localProjectId: string) => `frameforge:cloud-revision:${userId}:${localProjectId}`;
 const colorAdjustmentControls: { field: keyof ColorAdjustment; label: string }[] = [
   { field: 'exposure', label: 'Exposure' },
   { field: 'contrast', label: 'Contrast' },
@@ -40,6 +41,9 @@ type TimelineDrag = {
   originalClip: TimelineClip;
   originalProject: ProjectDocument;
   changed: boolean;
+  snapPoints: number[];
+  snapTolerance: number;
+  snapEnabled: boolean;
 };
 
 type ImageLayerDrag = {
@@ -54,13 +58,25 @@ type ImageLayerDrag = {
   changed: boolean;
 };
 
-function TimelineComposition({ items, mediaUrls, effects, colorAdjustments, overlays, playhead, onMediaElement, onMediaMetadata }: {
+type ImageLayerResize = {
+  layerId: string;
+  centerX: number;
+  centerY: number;
+  startDistance: number;
+  originalScale: number;
+  originalProject: ProjectDocument;
+  changed: boolean;
+};
+
+function TimelineComposition({ items, mediaUrls, effects, colorAdjustments, overlays, playhead, selectedOverlayId, onSelectOverlay, onMediaElement, onMediaMetadata }: {
   items: TimelinePreviewItem[];
   mediaUrls: Record<string, string>;
   effects: AppliedEffect[];
   colorAdjustments: Record<string, ColorAdjustment>;
   overlays: TextOverlay[];
   playhead: number;
+  selectedOverlayId: string | null;
+  onSelectOverlay: (id: string) => void;
   onMediaElement: (clipId: string, element: HTMLMediaElement | null) => void;
   onMediaMetadata: (clipId: string, duration: number) => void;
 }) {
@@ -77,7 +93,7 @@ function TimelineComposition({ items, mediaUrls, effects, colorAdjustments, over
       </div>;
     })}
     {!visuals.length && <div className="timeline-composition-empty">No visual clip at this time</div>}
-    {overlays.filter((overlay) => playhead >= overlay.start && playhead < overlay.start + overlay.duration).map((overlay) => <div key={overlay.id} className={`timeline-text-overlay ${overlay.kind} position-${overlay.position}`} style={{ color: overlay.color, fontSize: `${Math.max(12, overlay.fontSize * 0.28)}px`, fontFamily: overlay.fontFamily ?? 'Manrope', fontWeight: overlay.fontWeight ?? 'bold', fontStyle: overlay.italic ? 'italic' : 'normal', WebkitTextStroke: `${overlay.outlineWidth ?? 0}px ${overlay.outlineColor ?? '#111111'}` }}>{overlay.text}</div>)}
+    {overlays.filter((overlay) => playhead >= overlay.start && playhead < overlay.start + overlay.duration).map((overlay) => <div key={overlay.id} className={`timeline-text-overlay ${overlay.kind} position-${overlay.position} ${selectedOverlayId === overlay.id ? 'overlay-selected' : ''}`} onClick={(event) => { event.stopPropagation(); onSelectOverlay(overlay.id); }} style={{ color: overlay.color, fontSize: `${Math.max(12, overlay.fontSize * 0.28)}px`, fontFamily: overlay.fontFamily ?? 'Manrope', fontWeight: overlay.fontWeight ?? 'bold', fontStyle: overlay.italic ? 'italic' : 'normal', textAlign: overlay.align ?? 'center', WebkitTextStroke: `${overlay.outlineWidth ?? 0}px ${overlay.outlineColor ?? '#111111'}` }}>{overlay.text}</div>)}
     {items.filter(({ track, asset }) => track.kind === 'audio' && (asset.kind === 'audio' || asset.kind === 'video')).map(({ clip, asset }) => {
       const url = mediaUrls[asset.id];
       return url ? <audio key={clip.id} ref={(element) => onMediaElement(clip.id, element)} src={url} preload="auto" onLoadedMetadata={(event) => onMediaMetadata(clip.id, event.currentTarget.duration)}/> : null;
@@ -113,14 +129,22 @@ export default function App() {
   const [previewMuted, setPreviewMuted] = useState(false);
   const [canvasZoom, setCanvasZoom] = useState(1);
   const [timelineZoom, setTimelineZoom] = useState(1);
+  const [timelineSnapEnabled, setTimelineSnapEnabled] = useState(true);
   const [notice, setNotice] = useState('');
   const [mediaUrls, setMediaUrls] = useState<Record<string, string>>({});
   const [audioWaveforms, setAudioWaveforms] = useState<Record<string, AudioWaveform | null>>({});
   const [loadingAssetId, setLoadingAssetId] = useState<string | null>(null);
   const [importingMedia, setImportingMedia] = useState(false);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [mediaLibraryTab, setMediaLibraryTab] = useState<'project' | 'cloud'>('project');
+  const [cloudMedia, setCloudMedia] = useState<CloudMedia[]>([]);
+  const [cloudMediaLoading, setCloudMediaLoading] = useState(false);
+  const [cloudMediaError, setCloudMediaError] = useState('');
+  const [cloudMediaReload, setCloudMediaReload] = useState(0);
+  const [addingCloudMediaId, setAddingCloudMediaId] = useState('');
   const [selectedImageLayerId, setSelectedImageLayerId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedTextOverlayId, setSelectedTextOverlayId] = useState<string | null>(null);
   const [trackManagerOpen, setTrackManagerOpen] = useState(false);
   const [trackNames, setTrackNames] = useState<Record<string, string>>({});
   const [accountOpen, setAccountOpen] = useState(false);
@@ -140,6 +164,15 @@ export default function App() {
   const [cloudProjectId, setCloudProjectId] = useState(() => {
     try { const user = JSON.parse(sessionStorage.getItem('frameforge:user') ?? 'null') as { id?: string } | null; return user?.id ? localStorage.getItem(cloudProjectKey(user.id, project.project.id)) ?? '' : ''; } catch { return ''; }
   });
+  const [cloudProjectRevision, setCloudProjectRevision] = useState<number | null>(() => {
+    try {
+      const user = JSON.parse(sessionStorage.getItem('frameforge:user') ?? 'null') as { id?: string } | null;
+      const revision = user?.id ? Number(localStorage.getItem(cloudRevisionKey(user.id, project.project.id))) : NaN;
+      return Number.isInteger(revision) && revision > 0 ? revision : null;
+    } catch { return null; }
+  });
+  const [cloudConflict, setCloudConflict] = useState('');
+  const [resolvingCloudConflict, setResolvingCloudConflict] = useState(false);
   const [cloudProjects, setCloudProjects] = useState<CloudProject[]>([]);
   const [cloudVersions, setCloudVersions] = useState<CloudProjectVersion[]>([]);
   const [cloudVersionsLoading, setCloudVersionsLoading] = useState(false);
@@ -148,6 +181,8 @@ export default function App() {
   const [cloudProjectsError, setCloudProjectsError] = useState('');
   const [openingCloudProjectId, setOpeningCloudProjectId] = useState('');
   const [deletingCloudProjectId, setDeletingCloudProjectId] = useState('');
+  const [deletingLocalProjectId, setDeletingLocalProjectId] = useState('');
+  const [deletingCloudMediaId, setDeletingCloudMediaId] = useState('');
   const [savingVersion, setSavingVersion] = useState(false);
   const [restoringVersionId, setRestoringVersionId] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
@@ -166,7 +201,11 @@ export default function App() {
   const redoStack = useRef<ProjectDocument[]>([]);
   const timelineDrag = useRef<TimelineDrag | null>(null);
   const imageLayerDrag = useRef<ImageLayerDrag | null>(null);
+  const imageLayerResize = useRef<ImageLayerResize | null>(null);
   const exportAbort = useRef<AbortController | null>(null);
+  const cloudProjectRevisionRef = useRef<number | null>(cloudProjectRevision);
+  const lastSyncedCloudDocumentRef = useRef<{ id: string; document: string } | null>(null);
+  const cloudSaveInFlightRef = useRef<{ key: string; localProjectId: string; promise: Promise<CloudProject> } | null>(null);
   const [saved, setSaved] = useState(true);
   const lastClipEnd = Math.max(
     project.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0),
@@ -243,10 +282,20 @@ export default function App() {
           (asset.kind === 'audio' && targetTrack.kind === 'audio'));
       let updated: TimelineClip;
       if (drag.mode === 'move') {
+        let start = Math.max(0, Math.round((clip.start + delta) * drag.fps) / drag.fps);
+        if (drag.snapEnabled) {
+          let closest = drag.snapTolerance;
+          for (const point of drag.snapPoints) {
+            const startDistance = Math.abs(point - start);
+            const endDistance = Math.abs(point - (start + clip.duration));
+            if (startDistance <= closest) { closest = startDistance; start = Math.max(0, Math.round(point * drag.fps) / drag.fps); }
+            if (endDistance <= closest) { closest = endDistance; start = Math.max(0, Math.round((point - clip.duration) * drag.fps) / drag.fps); }
+          }
+        }
         updated = {
           ...clip,
           trackId: canMoveToTrack ? targetTrack.id : clip.trackId,
-          start: Math.max(0, Math.round((clip.start + delta) * drag.fps) / drag.fps),
+          start,
         };
       } else if (drag.mode === 'trim-start') {
         const speed = clip.speed ?? 1;
@@ -449,11 +498,21 @@ export default function App() {
 
   useEffect(() => {
     if (!sessionStorage.getItem('frameforge:access-token') || !cloudProjectId) return;
+    if (cloudConflict) return;
+    if (cloudProjectRevisionRef.current == null) {
+      setCloudConflict('This account project has no saved revision on this device. Choose reload or keep your local version before cloud sync continues.');
+      return;
+    }
+    if (lastSyncedCloudDocumentRef.current?.id === cloudProjectId && lastSyncedCloudDocumentRef.current.document === JSON.stringify(project)) return;
     const timer = window.setTimeout(() => {
-      void saveCloudProject(project.project.name, project, cloudProjectId).catch((error: Error) => setNotice(`Cloud save failed: ${error.message}`));
+      if (lastSyncedCloudDocumentRef.current?.id === cloudProjectId && lastSyncedCloudDocumentRef.current.document === JSON.stringify(project)) return;
+      void persistCloudProject(project).catch((error: Error) => {
+        if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message);
+        else setNotice(`Cloud save failed: ${error.message}`);
+      });
     }, 1400);
     return () => window.clearTimeout(timer);
-  }, [project, cloudProjectId]);
+  }, [project, cloudProjectId, cloudConflict]);
 
   useEffect(() => {
     if (!projectMenuOpen || !currentUser) return;
@@ -469,6 +528,26 @@ export default function App() {
     });
     return () => { active = false; };
   }, [projectMenuOpen, currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) setCloudMedia([]);
+    if (activeTool !== 'media' || mediaLibraryTab !== 'cloud' || !currentUser) {
+      setCloudMediaError('');
+      setCloudMediaLoading(false);
+      return;
+    }
+    let active = true;
+    setCloudMediaLoading(true);
+    setCloudMediaError('');
+    void listCloudMedia().then((items) => {
+      if (active) setCloudMedia(items);
+    }).catch((error: Error) => {
+      if (active) setCloudMediaError(error.message);
+    }).finally(() => {
+      if (active) setCloudMediaLoading(false);
+    });
+    return () => { active = false; };
+  }, [activeTool, mediaLibraryTab, currentUser, cloudMediaReload]);
 
   useEffect(() => {
     if (!projectMenuOpen || !currentUser || !cloudProjectId) {
@@ -493,10 +572,28 @@ export default function App() {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); }
       else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveDraft(); }
-      else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') { event.preventDefault(); duplicateSelectedClip(); }
+      else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') {
+        event.preventDefault();
+        if (activeTool === 'image' && selectedImageLayerId) duplicateImageLayer(selectedImageLayerId);
+        else if ((activeTool === 'text' || activeTool === 'captions') && selectedTextOverlayId) duplicateTextOverlay(selectedTextOverlayId);
+        else duplicateSelectedClip();
+      }
+      else if (activeTool === 'image' && selectedImageLayerId && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)
+        && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) {
+        const layer = project.imageLayers.find((item) => item.id === selectedImageLayerId);
+        if (!layer || layer.locked) return;
+        event.preventDefault();
+        const step = event.shiftKey ? 1 : 0.1;
+        const [dx, dy] = event.key === 'ArrowLeft' ? [-step, 0] : event.key === 'ArrowRight' ? [step, 0] : event.key === 'ArrowUp' ? [0, -step] : [0, step];
+        updateImageLayer(layer.id, { x: layer.x + dx, y: layer.y + dy });
+      }
       else if (event.code === 'Space' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) { event.preventDefault(); togglePlayback(); }
       else if (event.key.toLowerCase() === 's' && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) splitSelectedClip();
-      else if ((event.key === 'Delete' || event.key === 'Backspace') && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) deleteSelectedClip();
+      else if ((event.key === 'Delete' || event.key === 'Backspace') && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLSelectElement)) {
+        if (activeTool === 'image' && selectedImageLayerId) deleteImageLayer(selectedImageLayerId);
+        else if ((activeTool === 'text' || activeTool === 'captions') && selectedTextOverlayId) removeTextOverlay(selectedTextOverlayId);
+        else deleteSelectedClip();
+      }
     };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
   });
@@ -504,6 +601,41 @@ export default function App() {
   function commit(next: ProjectDocument) { undoStack.current.push(project); redoStack.current = []; setProject(next); setSaved(false); }
   function undo() { const prior = undoStack.current.pop(); if (prior) { redoStack.current.push(project); setProject(prior); setSaved(false); } }
   function redo() { const next = redoStack.current.pop(); if (next) { undoStack.current.push(project); setProject(next); setSaved(false); } }
+  function rememberCloudRevision(localProjectId: string, revision: number) {
+    cloudProjectRevisionRef.current = revision;
+    setCloudProjectRevision(revision);
+    if (currentUser) {
+      try { localStorage.setItem(cloudRevisionKey(currentUser.id, localProjectId), String(revision)); }
+      catch { setNotice('Project revision is active for this session but could not be saved to this device.'); }
+    }
+  }
+  async function persistCloudProject(document: ProjectDocument, id = cloudProjectId, expectedOverride?: number) {
+    const key = `${id}:${JSON.stringify(document)}`;
+    const inFlight = cloudSaveInFlightRef.current;
+    if (inFlight) {
+      if (inFlight.key === key) return inFlight.promise;
+      const completed = await inFlight.promise;
+      const nextId = id || (inFlight.localProjectId === document.project.id ? completed.id : '');
+      return persistCloudProject(document, nextId, expectedOverride);
+    }
+    const expectedRevision = id ? expectedOverride ?? cloudProjectRevisionRef.current ?? undefined : undefined;
+    if (id && expectedRevision === undefined) throw new ApiError('The saved project revision is unknown. Reload the account copy or explicitly keep this local version.', 409, 'project_conflict');
+    const promise = saveCloudProject(document.project.name, document, id || undefined, expectedRevision);
+    cloudSaveInFlightRef.current = { key, localProjectId: document.project.id, promise };
+    try {
+      const remote = await promise;
+      setCloudProjectId(remote.id);
+      rememberCloudRevision(document.project.id, remote.revision);
+      lastSyncedCloudDocumentRef.current = { id: remote.id, document: JSON.stringify(document) };
+      if (currentUser) {
+        try { localStorage.setItem(cloudProjectKey(currentUser.id, document.project.id), remote.id); }
+        catch { setNotice('Project saved to your account, but this device could not store its account link.'); }
+      }
+      return remote;
+    } finally {
+      if (cloudSaveInFlightRef.current?.promise === promise) cloudSaveInFlightRef.current = null;
+    }
+  }
   function toggleSafeMargins() {
     commit({ ...project, settings: { ...project.settings, safeMargins: !safeMarginsEnabled } });
   }
@@ -566,6 +698,40 @@ export default function App() {
     imageLayerDrag.current = null;
     if (drag.changed) {
       undoStack.current.push(drag.originalProject);
+      redoStack.current = [];
+    }
+  }
+  function beginImageLayerResize(event: ReactPointerEvent<HTMLButtonElement>, layer: ImageLayer) {
+    if (layer.locked) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+    const centerX = bounds.left + bounds.width / 2;
+    const centerY = bounds.top + bounds.height / 2;
+    const startDistance = Math.hypot(event.clientX - centerX, event.clientY - centerY);
+    if (startDistance <= 0) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setSelectedImageLayerId(layer.id);
+    setSelectedAssetId(layer.assetId);
+    imageLayerResize.current = { layerId: layer.id, centerX, centerY, startDistance, originalScale: layer.scale, originalProject: project, changed: false };
+  }
+  function moveImageLayerResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = imageLayerResize.current;
+    if (!resize) return;
+    event.preventDefault();
+    const distance = Math.hypot(event.clientX - resize.centerX, event.clientY - resize.centerY);
+    const scale = Math.max(0.1, Math.min(5, resize.originalScale * distance / resize.startDistance));
+    resize.changed ||= Math.abs(scale - resize.originalScale) > 0.001;
+    setProject({ ...resize.originalProject, imageLayers: resize.originalProject.imageLayers.map((layer) => layer.id === resize.layerId ? { ...layer, scale } : layer) });
+    setSaved(false);
+  }
+  function finishImageLayerResize() {
+    const resize = imageLayerResize.current;
+    if (!resize) return;
+    imageLayerResize.current = null;
+    if (resize.changed) {
+      undoStack.current.push(resize.originalProject);
       redoStack.current = [];
     }
   }
@@ -728,15 +894,25 @@ export default function App() {
   function addTextOverlays(overlays: TextOverlay[]) {
     if (!overlays.length) return;
     commit({ ...project, textOverlays: [...project.textOverlays, ...overlays] });
+    setSelectedTextOverlayId(overlays[0].id);
     setPreviewMode('timeline');
     setPlayhead(overlays[0].start);
     setNotice(`${overlays.length} ${overlays[0].kind === 'caption' ? 'caption' : 'title'}${overlays.length === 1 ? '' : 's'} added.`);
+  }
+  function duplicateTextOverlay(overlayId: string) {
+    const overlay = project.textOverlays.find((item) => item.id === overlayId);
+    if (!overlay) return;
+    const duplicate = { ...overlay, id: crypto.randomUUID(), start: overlay.start + overlay.duration };
+    commit({ ...project, textOverlays: [...project.textOverlays, duplicate] });
+    setSelectedTextOverlayId(duplicate.id);
   }
   function updateTextOverlay(updated: TextOverlay) {
     commit({ ...project, textOverlays: project.textOverlays.map((overlay) => overlay.id === updated.id ? updated : overlay) });
   }
   function removeTextOverlay(id: string) {
+    if (!project.textOverlays.some((overlay) => overlay.id === id)) return;
     commit({ ...project, textOverlays: project.textOverlays.filter((overlay) => overlay.id !== id) });
+    if (selectedTextOverlayId === id) setSelectedTextOverlayId(null);
   }
   function updateTransition(field: 'transitionIn' | 'transitionOut', value: number) {
     if (!selectedClip) return;
@@ -805,6 +981,9 @@ export default function App() {
       originalClip: clip,
       originalProject: project,
       changed: false,
+      snapPoints: [...project.clips.filter((item) => item.id !== clip.id).flatMap((item) => [item.start, item.start + item.duration]), playhead],
+      snapTolerance: duration / bounds.width * 9,
+      snapEnabled: timelineSnapEnabled,
     };
   }
   async function importFiles(files: FileList | null) {
@@ -846,7 +1025,7 @@ export default function App() {
     setSelectedAssetId(additions[0].id);
     const newImageLayers: ImageLayer[] = additions.filter((asset) => asset.kind === 'image').map((asset) => ({
       id: crypto.randomUUID(), assetId: asset.id, name: asset.name, visible: true, locked: false, opacity: 1,
-      blendMode: 'normal', x: 0, y: 0, scale: 1, rotation: 0, cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0,
+      blendMode: 'normal', mask: 'none', x: 0, y: 0, scale: 1, rotation: 0, cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0,
     }));
     commit({ ...project, assets: [...project.assets, ...additions], clips, imageLayers: [...project.imageLayers, ...newImageLayers] });
     if (newImageLayers.length) setSelectedImageLayerId(newImageLayers[newImageLayers.length - 1].id);
@@ -856,6 +1035,51 @@ export default function App() {
         ? `${additions.length} media item${additions.length === 1 ? '' : 's'} saved on this device and uploaded to your account.`
         : `${additions.length} media item${additions.length === 1 ? '' : 's'} added and stored on this device.`);
     setImportingMedia(false);
+  }
+  async function addCloudMediaToProject(item: CloudMedia) {
+    if (addingCloudMediaId) return;
+    const existing = project.assets.find((asset) => asset.cloudId === item.id);
+    if (existing) {
+      setMediaLibraryTab('project');
+      setSelectedAssetId(existing.id);
+      setNotice(`“${item.name}” is already in this project.`);
+      return;
+    }
+    setAddingCloudMediaId(item.id);
+    try {
+      const blob = await getCloudMediaContent(item.id);
+      const assetId = crypto.randomUUID();
+      const kind: MediaAsset['kind'] = item.mime_type.startsWith('audio/') ? 'audio' : item.mime_type.startsWith('image/') ? 'image' : 'video';
+      const asset: MediaAsset = { id: assetId, name: item.name, kind, mimeType: item.mime_type, size: item.size, cloudId: item.id };
+      await storeMedia(assetId, blob);
+      const url = URL.createObjectURL(blob);
+      mediaUrlMap.current = { ...mediaUrlMap.current, [assetId]: url };
+      setMediaUrls({ ...mediaUrlMap.current });
+      const clips = [...project.clips];
+      const track = project.tracks.find((entry) => kind === 'audio' ? entry.kind === 'audio' : entry.kind === 'video');
+      if (track) {
+        const start = clips.filter((clip) => clip.trackId === track.id).reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
+        clips.push({ id: crypto.randomUUID(), assetId, trackId: track.id, start, duration: kind === 'audio' ? 8 : 4, sourceOffset: 0 });
+        setSelectedClipId(clips[clips.length - 1].id);
+        setPlayhead(start);
+        setPreviewMode('timeline');
+      } else {
+        setSelectedClipId(null);
+        setPreviewMode('asset');
+      }
+      const imageLayers: ImageLayer[] = kind === 'image'
+        ? [...project.imageLayers, { id: crypto.randomUUID(), assetId, name: item.name, visible: true, locked: false, opacity: 1, blendMode: 'normal', mask: 'none', x: 0, y: 0, scale: 1, rotation: 0, cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }]
+        : project.imageLayers;
+      commit({ ...project, assets: [...project.assets, asset], clips, imageLayers });
+      if (kind === 'image') setSelectedImageLayerId(imageLayers[imageLayers.length - 1].id);
+      setSelectedAssetId(assetId);
+      setMediaLibraryTab('project');
+      setNotice(`Added “${item.name}” from your account library.`);
+    } catch (error) {
+      setNotice(`Could not add “${item.name}” to this project: ${(error as Error).message}`);
+    } finally {
+      setAddingCloudMediaId('');
+    }
   }
   function addAssetToTimeline(assetId: string) {
     const asset = project.assets.find((item) => item.id === assetId);
@@ -869,8 +1093,8 @@ export default function App() {
   async function saveDraft() {
     localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project)); setSaved(true);
     if (sessionStorage.getItem('frameforge:access-token')) {
-      try { const savedProject = await saveCloudProject(project.project.name, project, cloudProjectId || undefined); setCloudProjectId(savedProject.id); if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, project.project.id), savedProject.id); setNotice('Draft and uploaded media references saved on this device and to your account. Local-only media remains on this device.'); }
-      catch (error) { setNotice(`Saved on this device. Cloud save failed: ${(error as Error).message}`); }
+      try { await persistCloudProject(project); setCloudConflict(''); setNotice('Draft and uploaded media references saved on this device and to your account. Local-only media remains on this device.'); }
+      catch (error) { if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message); else setNotice(`Saved on this device. Cloud save failed: ${(error as Error).message}`); }
     } else setNotice('Draft saved on this device. Sign in from the account menu to save to your account.');
   }
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
@@ -878,15 +1102,46 @@ export default function App() {
     try {
       const user = await authenticate(authMode, email, password); setCurrentUser(user); sessionStorage.setItem('frameforge:user', JSON.stringify(user));
       const userProjectId = localStorage.getItem(cloudProjectKey(user.id, project.project.id)) ?? (currentUser?.id === user.id ? cloudProjectId : '');
-      const savedProject = await saveCloudProject(project.project.name, project, userProjectId || undefined); setCloudProjectId(savedProject.id); localStorage.setItem(cloudProjectKey(user.id, project.project.id), savedProject.id);
+      const knownRevision = Number(localStorage.getItem(cloudRevisionKey(user.id, project.project.id)));
+      if (userProjectId) {
+        setCloudProjectId(userProjectId);
+        if (Number.isInteger(knownRevision) && knownRevision > 0) {
+          setCloudProjectRevision(knownRevision);
+          cloudProjectRevisionRef.current = knownRevision;
+        }
+      }
+      if (userProjectId && (!Number.isInteger(knownRevision) || knownRevision < 1)) {
+        const remote = await getCloudProject(userProjectId);
+        setCloudProjectId(remote.id);
+        setCloudProjectRevision(remote.revision);
+        cloudProjectRevisionRef.current = remote.revision;
+        setCloudConflict('This account project has no saved revision on this device. Choose reload or explicitly keep your local version before cloud sync continues.');
+        setAccountOpen(false); setPassword(''); setNotice(`Signed in as ${user.email}. Resolve the project sync choice before cloud autosave resumes.`);
+        return;
+      }
+      const savedProject = userProjectId
+        ? await saveCloudProject(project.project.name, project, userProjectId, knownRevision)
+        : await saveCloudProject(project.project.name, project);
+      setCloudProjectId(savedProject.id);
+      setCloudProjectRevision(savedProject.revision);
+      cloudProjectRevisionRef.current = savedProject.revision;
+      lastSyncedCloudDocumentRef.current = { id: savedProject.id, document: JSON.stringify(project) };
+      localStorage.setItem(cloudProjectKey(user.id, project.project.id), savedProject.id);
+      localStorage.setItem(cloudRevisionKey(user.id, project.project.id), String(savedProject.revision));
+      setCloudConflict('');
       setAccountOpen(false); setPassword(''); setNotice(`Signed in as ${user.email}; project synced.`);
-    } catch (error) { setAuthError((error as Error).message); }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        setCloudConflict(error.message);
+        setAccountOpen(false); setPassword('');
+      } else setAuthError((error as Error).message);
+    }
     finally { setAuthBusy(false); }
   }
-  function signOut() { sessionStorage.removeItem('frameforge:access-token'); sessionStorage.removeItem('frameforge:user'); setCurrentUser(null); setCloudProjectId(''); setAccountOpen(false); setAdminPanelOpen(false); setNotice('Signed out. This device draft remains available.'); }
+  function signOut() { sessionStorage.removeItem('frameforge:access-token'); sessionStorage.removeItem('frameforge:user'); setCurrentUser(null); setCloudProjectId(''); setCloudProjectRevision(null); cloudProjectRevisionRef.current = null; lastSyncedCloudDocumentRef.current = null; setCloudConflict(''); setAccountOpen(false); setAdminPanelOpen(false); setNotice('Signed out. This device draft remains available.'); }
   function startNewProject() {
     localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
-    setProject(makeProject()); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(''); setProjectMenuOpen(false); setSaved(false);
+    setProject(makeProject()); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(''); setCloudProjectRevision(null); cloudProjectRevisionRef.current = null; lastSyncedCloudDocumentRef.current = null; setCloudConflict(''); setProjectMenuOpen(false); setSaved(false);
   }
   async function duplicateCurrentProject() {
     const duplicate = structuredClone(project);
@@ -899,13 +1154,12 @@ export default function App() {
     setPlaying(false);
     setPlayhead(0);
     setPreviewMode(duplicate.clips.length ? 'timeline' : 'asset');
-    setCloudProjectId('');
+    setCloudProjectId(''); setCloudProjectRevision(null); cloudProjectRevisionRef.current = null; lastSyncedCloudDocumentRef.current = null; setCloudConflict('');
     setProjectMenuOpen(false);
     setSaved(true);
     if (currentUser && sessionStorage.getItem('frameforge:access-token')) {
       try {
-        const savedProject = await saveCloudProject(duplicate.project.name, duplicate);
-        setCloudProjectId(savedProject.id);
+        const savedProject = await persistCloudProject(duplicate, '');
         localStorage.setItem(cloudProjectKey(currentUser.id, duplicate.project.id), savedProject.id);
         setNotice(`Created a copy of “${project.project.name}” and synced it to your account.`);
       } catch (error) {
@@ -916,14 +1170,46 @@ export default function App() {
     }
   }
   function openLocalProject(id: string) {
-    try { const savedProject = localStorage.getItem(`frameforge:${id}`); if (!savedProject) throw new Error('Project draft not found on this device.'); const restored = parseProjectDocument(JSON.parse(savedProject)); setProject(restored); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(currentUser ? localStorage.getItem(cloudProjectKey(currentUser.id, id)) ?? '' : ''); setProjectMenuOpen(false); setSaved(true); }
+    try {
+      const savedProject = localStorage.getItem(`frameforge:${id}`);
+      if (!savedProject) throw new Error('Project draft not found on this device.');
+      const restored = parseProjectDocument(JSON.parse(savedProject));
+      lastSyncedCloudDocumentRef.current = null;
+      const mappedCloudId = currentUser ? localStorage.getItem(cloudProjectKey(currentUser.id, id)) ?? '' : '';
+      const storedRevision = currentUser && mappedCloudId ? Number(localStorage.getItem(cloudRevisionKey(currentUser.id, id))) : NaN;
+      const revision = Number.isInteger(storedRevision) && storedRevision > 0 ? storedRevision : null;
+      setProject(restored); setSelectedAssetId(null); setSelectedClipId(null); setPlaying(false); setPreviewMode('asset'); setPlayhead(0); setCloudProjectId(mappedCloudId); setCloudProjectRevision(revision); cloudProjectRevisionRef.current = revision;
+      setCloudConflict(mappedCloudId && revision == null ? 'This account project has no saved revision on this device. Choose reload or explicitly keep your local version before cloud sync continues.' : '');
+      setProjectMenuOpen(false); setSaved(true);
+    }
     catch (error) { setNotice((error as Error).message); }
+  }
+  function removeLocalProject(item: { id: string; name: string }) {
+    if (item.id === project.project.id || deletingLocalProjectId) return;
+    if (!window.confirm(`Delete “${item.name}” from this device? Any account copy remains in your account.`)) return;
+    setDeletingLocalProjectId(item.id);
+    try {
+      localStorage.removeItem(`frameforge:${item.id}`);
+      if (currentUser) {
+        localStorage.removeItem(cloudProjectKey(currentUser.id, item.id));
+        localStorage.removeItem(cloudRevisionKey(currentUser.id, item.id));
+      }
+      const next = localProjects.filter((entry) => entry.id !== item.id);
+      setLocalProjects(next);
+      localStorage.setItem('frameforge:projects-index', JSON.stringify(next));
+      setNotice(`Deleted “${item.name}” from this device. Account copies are unchanged.`);
+    } catch (error) {
+      setNotice(`Could not delete this local draft: ${(error as Error).message}`);
+    } finally {
+      setDeletingLocalProjectId('');
+    }
   }
   async function openCloudProject(id: string) {
     setOpeningCloudProjectId(id);
     try {
       const remote = await getCloudProject(id);
       const restored = parseProjectDocument(remote.document);
+      lastSyncedCloudDocumentRef.current = { id: remote.id, document: JSON.stringify(restored) };
       localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
       setProject(restored);
       setSelectedAssetId(null);
@@ -932,6 +1218,8 @@ export default function App() {
       setPreviewMode('asset');
       setPlayhead(0);
       setCloudProjectId(remote.id);
+      rememberCloudRevision(restored.project.id, remote.revision);
+      setCloudConflict('');
       if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, restored.project.id), remote.id);
       setProjectMenuOpen(false);
       setSaved(true);
@@ -955,8 +1243,11 @@ export default function App() {
       await deleteCloudProject(item.id);
       setCloudProjects((items) => items.filter((projectItem) => projectItem.id !== item.id));
       if (activeProject) {
-        setCloudProjectId('');
-        if (currentUser) localStorage.removeItem(cloudProjectKey(currentUser.id, project.project.id));
+        setCloudProjectId(''); setCloudProjectRevision(null); cloudProjectRevisionRef.current = null; setCloudConflict('');
+        if (currentUser) {
+          localStorage.removeItem(cloudProjectKey(currentUser.id, project.project.id));
+          localStorage.removeItem(cloudRevisionKey(currentUser.id, project.project.id));
+        }
       }
       setNotice(`Deleted “${item.name}” from your account. The local device draft remains.`);
     } catch (error) {
@@ -965,6 +1256,95 @@ export default function App() {
       setDeletingCloudProjectId('');
     }
   }
+  async function removeCloudMedia(asset: MediaAsset) {
+    if (!asset.cloudId || deletingCloudMediaId) return;
+    const confirmed = window.confirm(`Delete the uploaded copy of “${asset.name}” from your account? The local device copy stays in this project. Other account projects that reference this file may need to re-upload it.`);
+    if (!confirmed) return;
+    setDeletingCloudMediaId(asset.cloudId);
+    const localOnlyProject = { ...project, assets: project.assets.map((item) => item.id === asset.id ? { ...item, cloudId: undefined } : item) };
+    let cloudProjectDetached = false;
+    try {
+      if (cloudProjectId) {
+        await persistCloudProject(localOnlyProject);
+        cloudProjectDetached = true;
+      }
+      await deleteCloudMedia(asset.cloudId);
+      commit(localOnlyProject);
+      setCloudMedia((items) => items.filter((item) => item.id !== asset.cloudId));
+      setNotice(`Deleted the account copy of “${asset.name}”. Its local copy remains in this project.`);
+    } catch (error) {
+      let restoreFailed = false;
+      if (cloudProjectDetached && cloudProjectId) {
+        try { await persistCloudProject(project); }
+        catch { restoreFailed = true; }
+      }
+      if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message);
+      else setNotice(`Could not delete the account copy of “${asset.name}”: ${(error as Error).message}${restoreFailed ? ' The cloud project could not be rolled back; save it again to synchronize.' : ''}`);
+    } finally {
+      setDeletingCloudMediaId('');
+    }
+  }
+  async function reloadCloudConflict() {
+    if (!cloudProjectId || resolvingCloudConflict) return;
+    setResolvingCloudConflict(true);
+    try {
+      const remote = await getCloudProject(cloudProjectId);
+      const restored = parseProjectDocument(remote.document);
+      lastSyncedCloudDocumentRef.current = { id: remote.id, document: JSON.stringify(restored) };
+      localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
+      localStorage.setItem('frameforge:last-project', JSON.stringify(project));
+      setProject(restored);
+      setSelectedAssetId(null);
+      setSelectedClipId(null);
+      setSelectedImageLayerId(null);
+      setPlaying(false);
+      setPreviewMode(restored.clips.length ? 'timeline' : 'asset');
+      setPlayhead(0);
+      rememberCloudRevision(restored.project.id, remote.revision);
+      if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, restored.project.id), remote.id);
+      setCloudConflict('');
+      setSaved(true);
+      setNotice(`Reloaded the latest account copy of “${remote.name}”. Your previous device draft remains saved locally.`);
+    } catch (error) {
+      setNotice(`Could not reload the account project: ${(error as Error).message}`);
+    } finally {
+      setResolvingCloudConflict(false);
+    }
+  }
+  async function keepLocalCloudConflict() {
+    if (!cloudProjectId || resolvingCloudConflict) return;
+    setResolvingCloudConflict(true);
+    try {
+      const latest = await getCloudProject(cloudProjectId);
+      const backup = await createCloudProjectVersion(cloudProjectId);
+      const savedProject = await saveCloudProject(project.project.name, project, cloudProjectId, latest.revision);
+      setCloudVersions((versions) => [backup, ...versions.filter((item) => item.id !== backup.id)]);
+      rememberCloudRevision(project.project.id, savedProject.revision);
+      lastSyncedCloudDocumentRef.current = { id: savedProject.id, document: JSON.stringify(project) };
+      if (currentUser) localStorage.setItem(cloudProjectKey(currentUser.id, project.project.id), savedProject.id);
+      setCloudConflict('');
+      setSaved(true);
+      setNotice(`Kept this device version. The displaced account copy is saved as version ${backup.version_number}.`);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message);
+      else setNotice(`Could not keep the local version: ${(error as Error).message}`);
+    } finally {
+      setResolvingCloudConflict(false);
+    }
+  }
+  function keepLocalOnlyAfterConflict() {
+    if (currentUser) {
+      localStorage.removeItem(cloudProjectKey(currentUser.id, project.project.id));
+      localStorage.removeItem(cloudRevisionKey(currentUser.id, project.project.id));
+    }
+    setCloudProjectId('');
+    setCloudProjectRevision(null);
+    cloudProjectRevisionRef.current = null;
+    lastSyncedCloudDocumentRef.current = null;
+    setCloudConflict('');
+    setSaved(true);
+    setNotice('Kept this project as a local draft. It is no longer linked to the account copy.');
+  }
   async function saveProjectVersion() {
     if (!cloudProjectId || !currentUser || !sessionStorage.getItem('frameforge:access-token')) {
       setNotice('Sign in and save this project to your account before creating a version.');
@@ -972,24 +1352,32 @@ export default function App() {
     }
     setSavingVersion(true);
     try {
-      await saveCloudProject(project.project.name, project, cloudProjectId);
+      await persistCloudProject(project);
       const version = await createCloudProjectVersion(cloudProjectId);
       setCloudVersions((versions) => [version, ...versions.filter((item) => item.id !== version.id)]);
       setNotice(`Saved version ${version.version_number} to your account.`);
     } catch (error) {
-      setNotice(`Could not save project version: ${(error as Error).message}`);
+      if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message);
+      else setNotice(`Could not save project version: ${(error as Error).message}`);
     } finally {
       setSavingVersion(false);
     }
   }
   async function restoreProjectVersion(version: CloudProjectVersion) {
     if (!cloudProjectId || !window.confirm(`Restore version ${version.version_number} of “${version.name}”? Current edits are saved locally first.`)) return;
+    if (cloudProjectRevisionRef.current == null) {
+      setCloudConflict('This project has no saved revision on this device. Resolve the project sync choice before restoring a version.');
+      return;
+    }
     setRestoringVersionId(version.id);
     try {
       localStorage.setItem(`frameforge:${project.project.id}`, JSON.stringify(project));
       localStorage.setItem('frameforge:last-project', JSON.stringify(project));
-      const restored = await restoreCloudProjectVersion(cloudProjectId, version.id);
+      const restored = await restoreCloudProjectVersion(cloudProjectId, version.id, cloudProjectRevisionRef.current);
       const document = parseProjectDocument(restored.document);
+      rememberCloudRevision(document.project.id, restored.revision);
+      lastSyncedCloudDocumentRef.current = { id: restored.id, document: JSON.stringify(document) };
+      setCloudConflict('');
       setProject(document);
       setSelectedAssetId(null);
       setSelectedClipId(null);
@@ -1002,7 +1390,8 @@ export default function App() {
       setNotice(`Restored version ${version.version_number}.`);
       setProjectMenuOpen(false);
     } catch (error) {
-      setNotice(`Could not restore project version: ${(error as Error).message}`);
+      if (error instanceof ApiError && error.status === 409) setCloudConflict(error.message);
+      else setNotice(`Could not restore project version: ${(error as Error).message}`);
     } finally {
       setRestoringVersionId('');
     }
@@ -1085,7 +1474,7 @@ export default function App() {
           </>}
           {localProjects.length > 0 && <>
             <div className="project-menu-label recent-label">ON THIS DEVICE</div>
-            {localProjects.slice(0, 5).map((item) => <button className={`local-project-item ${item.id === project.project.id ? 'current' : ''}`} key={item.id} onClick={() => openLocalProject(item.id)}><span>{item.name}</span><small>{new Date(item.updatedAt).toLocaleDateString()}</small></button>)}
+            {localProjects.slice(0, 5).map((item) => <div className="cloud-project-row" key={item.id}><button className={`local-project-item ${item.id === project.project.id ? 'current' : ''}`} disabled={openingCloudProjectId !== '' || deletingLocalProjectId !== ''} onClick={() => openLocalProject(item.id)}><span>{item.name}</span><small>{new Date(item.updatedAt).toLocaleDateString()}</small></button><button className="cloud-project-delete" aria-label={`Delete local draft ${item.name}`} title={item.id === project.project.id ? 'Open another project before deleting this draft' : 'Delete local draft'} disabled={item.id === project.project.id || deletingLocalProjectId !== '' || openingCloudProjectId !== ''} onClick={() => removeLocalProject(item)}><Trash2 size={13}/></button></div>)}
           </>}
           {currentUser && <>
             <div className="project-menu-label recent-label">IN YOUR ACCOUNT</div>
@@ -1107,14 +1496,26 @@ export default function App() {
         <div className="panel-heading"><div><span className="eyebrow">WORKSPACE</span><h1>{toolTitle[activeTool]}</h1></div><button className="icon-button subtle" title="Collapse panel"><PanelLeftClose size={16}/></button></div>
         <div className="search-box"><span>⌕</span><input aria-label="Search media" placeholder={`Search ${activeToolInfo.label.toLowerCase()}`} /><kbd>⌘ K</kbd></div>
         {activeTool === 'media' ? <>
-          <div className="media-tabs"><button className="tab active">Library <span>{project.assets.length}</span></button><button className="tab">Folders</button></div>
-          <button className="import-card" disabled={importingMedia} onClick={() => fileRef.current?.click()}><span className="upload-icon"><Upload size={18}/></span><strong>{importingMedia ? 'Adding media…' : 'Import media'}</strong><span>Video, image, and audio files</span><kbd>⌘ I</kbd></button>
-          <input ref={fileRef} type="file" accept="video/*,image/*,audio/*" multiple hidden disabled={importingMedia} onChange={(event) => importFiles(event.target.files)} />
-          <div className="asset-filter"><span>ALL MEDIA</span><button>Recent <ChevronDown size={12}/></button></div>
-          {project.assets.length ? <div className="asset-list">{project.assets.map((asset) => <div className={`asset-row ${selectedAssetId === asset.id ? 'asset-selected' : ''}`} key={asset.id} onClick={() => { setSelectedAssetId(asset.id); setSelectedClipId(null); setPreviewMode('asset'); setPlayhead(0); setPlaying(false); }}><div className={`asset-thumb ${asset.kind}`}>{asset.kind === 'audio' ? <Music2 size={15}/> : asset.kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{asset.name}</strong><span>{asset.kind} · {((asset.size ?? 0) / 1048576).toFixed(1)} MB</span></div><button className="mini-add" title="Add to timeline" onClick={(event) => { event.stopPropagation(); addAssetToTimeline(asset.id); }}><Plus size={15}/></button></div>)}</div> : <div className="empty-media"><div className="empty-stack"><Image size={18}/><Music2 size={17}/><Film size={18}/></div><strong>Your library is ready</strong><p>Bring in footage, images, or audio to begin building your story.</p><button onClick={() => fileRef.current?.click()}><Plus size={14}/>Add your first media</button></div>}
-          <div className="storage-meter"><div><span>LOCAL PROJECT</span><MoreHorizontal size={15}/></div><div className="meter"><i style={{ width: `${Math.min(100, project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / (500 * 1048576) * 100)}%` }}/></div><small>{(project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / 1048576).toFixed(1)} MB on this device</small></div>
+          <div className="media-tabs"><button className={`tab ${mediaLibraryTab === 'project' ? 'active' : ''}`} onClick={() => setMediaLibraryTab('project')}>Library <span>{project.assets.length}</span></button><button className={`tab ${mediaLibraryTab === 'cloud' ? 'active' : ''}`} onClick={() => setMediaLibraryTab('cloud')}>Cloud <span>{currentUser ? cloudMedia.length : '↗'}</span></button></div>
+          {mediaLibraryTab === 'project' ? <>
+            <button className="import-card" disabled={importingMedia} onClick={() => fileRef.current?.click()}><span className="upload-icon"><Upload size={18}/></span><strong>{importingMedia ? 'Adding media…' : 'Import media'}</strong><span>Video, image, and audio files</span><kbd>⌘ I</kbd></button>
+            <input ref={fileRef} type="file" accept="video/*,image/*,audio/*" multiple hidden disabled={importingMedia} onChange={(event) => importFiles(event.target.files)} />
+            <div className="asset-filter"><span>PROJECT MEDIA</span><button>Recent <ChevronDown size={12}/></button></div>
+            {project.assets.length ? <div className="asset-list">{project.assets.map((asset) => <div className={`asset-row ${selectedAssetId === asset.id ? 'asset-selected' : ''}`} key={asset.id} onClick={() => { setSelectedAssetId(asset.id); setSelectedClipId(null); setPreviewMode('asset'); setPlayhead(0); setPlaying(false); }}><div className={`asset-thumb ${asset.kind}`}>{asset.kind === 'audio' ? <Music2 size={15}/> : asset.kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{asset.name}</strong><span>{asset.kind} · {((asset.size ?? 0) / 1048576).toFixed(1)} MB</span></div>{asset.cloudId && <button className="cloud-media-delete" aria-label={`Delete cloud media ${asset.name}`} title="Delete uploaded copy from your account" disabled={deletingCloudMediaId !== ''} onClick={(event) => { event.stopPropagation(); void removeCloudMedia(asset); }}>{deletingCloudMediaId === asset.cloudId ? '…' : <Trash2 size={13}/>}</button>}<button className="mini-add" title="Add to timeline" onClick={(event) => { event.stopPropagation(); addAssetToTimeline(asset.id); }}><Plus size={15}/></button></div>)}</div> : <div className="empty-media"><div className="empty-stack"><Image size={18}/><Music2 size={17}/><Film size={18}/></div><strong>Your library is ready</strong><p>Bring in footage, images, or audio to begin building your story.</p><button onClick={() => fileRef.current?.click()}><Plus size={14}/>Add your first media</button></div>}
+            <div className="storage-meter"><div><span>LOCAL PROJECT</span><MoreHorizontal size={15}/></div><div className="meter"><i style={{ width: `${Math.min(100, project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / (500 * 1048576) * 100)}%` }}/></div><small>{(project.assets.reduce((sum, asset) => sum + (asset.size ?? 0), 0) / 1048576).toFixed(1)} MB on this device</small></div>
+          </> : <div className="cloud-media-library">
+            {!currentUser ? <div className="cloud-library-empty"><Cloud size={18}/><strong>Sign in to browse account media</strong><p>Uploaded files from your account will appear here.</p><button onClick={() => setAccountOpen(true)}>Sign in</button></div>
+              : cloudMediaLoading ? <div className="cloud-project-message">Loading account media…</div>
+                : cloudMediaError ? <div className="cloud-project-message error" role="alert">{cloudMediaError}<button className="cloud-media-add" onClick={() => setCloudMediaReload((value) => value + 1)}>Retry</button></div>
+                  : cloudMedia.length ? cloudMedia.map((item) => {
+                    const added = project.assets.some((asset) => asset.cloudId === item.id);
+                    const kind = item.mime_type.startsWith('audio/') ? 'audio' : item.mime_type.startsWith('image/') ? 'image' : 'video';
+                    return <div className="cloud-media-row" key={item.id}><div className={`asset-thumb ${kind}`}>{kind === 'audio' ? <Music2 size={15}/> : kind === 'image' ? <Image size={15}/> : <Film size={15}/>}</div><div className="asset-meta"><strong>{item.name}</strong><span>{kind} · {(item.size / 1048576).toFixed(1)} MB</span></div><button className="cloud-media-add" disabled={addingCloudMediaId !== '' || added} onClick={() => void addCloudMediaToProject(item)}>{addingCloudMediaId === item.id ? 'Adding…' : added ? 'Added' : <><Plus size={13}/>Add</>}</button></div>;
+                  })
+                    : <div className="cloud-library-empty"><Cloud size={18}/><strong>No account media yet</strong><p>Import files while signed in to store them with your account.</p></div>}
+          </div>}
         </> : activeTool === 'image' ? <div className="image-studio-panel">
-          <div className="effects-intro"><span className="eyebrow">EDITABLE COMPOSITION</span><p>Image layers stay separate in the project. Reorder, hide, transform, and blend them on the canvas.</p></div>
+          <div className="effects-intro"><span className="eyebrow">EDITABLE COMPOSITION</span><p>Image layers stay separate in the project. Reorder, hide, transform, and blend them on the canvas. Select a layer, then use arrow keys to nudge it; hold Shift for larger steps.</p></div>
           <div className="image-layer-toolbar"><strong>Layers · {project.imageLayers.length}</strong><button className="tool-chip" disabled={!selectedImageLayer} onClick={() => selectedImageLayer && duplicateImageLayer(selectedImageLayer.id)}><Copy size={13}/>Duplicate</button></div>
           {!project.imageLayers.length ? <div className="effects-empty">Import an image from Media to start a layered composition.</div> : <div className="image-layer-list">
             {[...project.imageLayers].reverse().map((layer) => <div key={layer.id} className={`image-layer-row ${layer.id === selectedImageLayerId ? 'selected' : ''}`}>
@@ -1136,6 +1537,7 @@ export default function App() {
               <label>Rotation<input aria-label="Layer rotation" type="number" value={selectedImageLayer.rotation} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { rotation: event.currentTarget.valueAsNumber })}/></label>
             </div>
             <label className="image-layer-field">Blend mode<select aria-label="Blend mode" value={selectedImageLayer.blendMode} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { blendMode: event.currentTarget.value as ImageLayer['blendMode'] })}><option value="normal">Normal</option><option value="multiply">Multiply</option><option value="screen">Screen</option><option value="overlay">Overlay</option></select></label>
+            <label className="image-layer-field">Layer mask<select aria-label="Layer mask" value={selectedImageLayer.mask ?? 'none'} disabled={selectedImageLayer.locked} onChange={(event) => updateImageLayer(selectedImageLayer.id, { mask: event.currentTarget.value as ImageLayer['mask'] })}><option value="none">None</option><option value="ellipse">Ellipse</option></select></label>
             <label className="visual-opacity-label">Opacity <output>{Math.round(selectedImageLayer.opacity * 100)}%</output></label><input aria-label="Layer opacity" type="range" min="0" max="1" step="0.01" disabled={selectedImageLayer.locked} value={selectedImageLayer.opacity} onChange={(event) => updateImageLayer(selectedImageLayer.id, { opacity: Number(event.target.value) })}/>
             <div className="image-crop-heading">NON-DESTRUCTIVE CROP · %</div><div className="visual-transform-grid image-crop-grid">
               {([['cropLeft', 'Crop left'], ['cropTop', 'Crop top'], ['cropRight', 'Crop right'], ['cropBottom', 'Crop bottom']] as const).map(([edge, label]) => <label key={edge}>{label}<input aria-label={label} type="number" min="0" max="95" step="1" value={Math.round(selectedImageLayer[edge] * 100)} disabled={selectedImageLayer.locked} onChange={(event) => updateLayerCrop(selectedImageLayer.id, edge, event.currentTarget.valueAsNumber || 0)}/></label>)}
@@ -1218,13 +1620,13 @@ export default function App() {
           <div className="stage-corner top-left"/><div className="stage-corner top-right"/><div className="stage-corner bottom-left"/><div className="stage-corner bottom-right"/>
           <div className="canvas-frame" style={{ aspectRatio: `${project.canvas.width} / ${project.canvas.height}`, transform: `scale(${canvasZoom})` }}>
             <div className="canvas-gradient" style={{ background: project.canvas.background }}>
-              {activeTool === 'image' ? <div className="image-composition" aria-label="Layered image composition">{project.imageLayers.map((layer, index) => {
+              {activeTool === 'image' ? <div className="image-composition" aria-label="Layered image composition" onPointerMove={moveImageLayerResize} onPointerUp={finishImageLayerResize} onPointerCancel={finishImageLayerResize}>{project.imageLayers.map((layer, index) => {
                 const asset = project.assets.find((item) => item.id === layer.assetId);
                 const url = mediaUrls[layer.assetId];
                 if (!layer.visible || !asset || !url) return null;
                 const style = effectStyle(project.effects, asset.id, project.colorAdjustments[asset.id]);
-                return <img key={layer.id} alt={layer.name} src={url} draggable={false} onPointerDown={(event) => beginImageLayerDrag(event, layer)} onPointerMove={moveImageLayer} onPointerUp={finishImageLayerDrag} onPointerCancel={finishImageLayerDrag} style={{ zIndex: index, opacity: layer.opacity, mixBlendMode: layer.blendMode, filter: style.filter, clipPath: `inset(${layer.cropTop * 100}% ${layer.cropRight * 100}% ${layer.cropBottom * 100}% ${layer.cropLeft * 100}%)`, transform: `translate(${layer.x}%, ${layer.y}%) rotate(${layer.rotation}deg) scale(${layer.scale})`, cursor: layer.locked ? 'default' : 'grab', touchAction: 'none' }} />;
-              })}</div> : previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} colorAdjustments={project.colorAdjustments} overlays={project.textOverlays} playhead={playhead} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
+                return <img key={layer.id} alt={layer.name} src={url} draggable={false} onPointerDown={(event) => beginImageLayerDrag(event, layer)} onPointerMove={moveImageLayer} onPointerUp={finishImageLayerDrag} onPointerCancel={finishImageLayerDrag} style={{ zIndex: index, opacity: layer.opacity, mixBlendMode: layer.blendMode, filter: style.filter, clipPath: `inset(${layer.cropTop * 100}% ${layer.cropRight * 100}% ${layer.cropBottom * 100}% ${layer.cropLeft * 100}%)`, maskImage: layer.mask === 'ellipse' ? 'radial-gradient(ellipse, #000 69%, transparent 70%)' : undefined, WebkitMaskImage: layer.mask === 'ellipse' ? 'radial-gradient(ellipse, #000 69%, transparent 70%)' : undefined, transform: `translate(${layer.x}%, ${layer.y}%) rotate(${layer.rotation}deg) scale(${layer.scale})`, cursor: layer.locked ? 'default' : 'grab', touchAction: 'none' }} />;
+              })}{selectedImageLayer && selectedImageLayer.visible && !selectedImageLayer.locked && <div className="image-transform-box" role="group" aria-label={`Resize ${selectedImageLayer.name}`} style={{ transform: `translate(${selectedImageLayer.x}%, ${selectedImageLayer.y}%) rotate(${selectedImageLayer.rotation}deg) scale(${selectedImageLayer.scale})` }}><button type="button" className="image-transform-handle nw" aria-label="Resize layer from top left" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/><button type="button" className="image-transform-handle ne" aria-label="Resize layer from top right" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/><button type="button" className="image-transform-handle sw" aria-label="Resize layer from bottom left" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/><button type="button" className="image-transform-handle se" aria-label="Resize layer from bottom right" onPointerDown={(event) => beginImageLayerResize(event, selectedImageLayer)}/></div>}</div> : previewMode === 'timeline' ? <TimelineComposition items={activeTimelineItems} mediaUrls={mediaUrls} effects={project.effects} colorAdjustments={project.colorAdjustments} overlays={project.textOverlays} playhead={playhead} selectedOverlayId={selectedTextOverlayId} onSelectOverlay={setSelectedTextOverlayId} onMediaElement={setTimelineMediaElement} onMediaMetadata={updateClipDuration}/> : selectedAsset && mediaUrls[selectedAsset.id] ? <div className="media-preview">
                 {selectedAsset.kind === 'video' ? <video src={mediaUrls[selectedAsset.id]} style={{ filter: previewEffect.filter }} playsInline controls/> : selectedAsset.kind === 'image' ? <img src={mediaUrls[selectedAsset.id]} alt={selectedAsset.name} style={{ filter: previewEffect.filter }}/> : <div className="audio-preview"><div className="audio-preview-icon"><AudioLines size={25}/></div><strong>{selectedAsset.name}</strong><span>Audio preview</span><audio src={mediaUrls[selectedAsset.id]} controls/></div>}
                 {selectedAsset.kind !== 'audio' && previewEffect.vignette > 0 && <div className="preview-vignette" style={{ background: `radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,${previewEffect.vignette * 0.78}) 100%)` }}/>}
               </div> : <><div className="canvas-glow one"/><div className="canvas-glow two"/><div className="canvas-center"><div className="center-mark"><Clapperboard size={21}/></div><span className="canvas-overline">{selectedAsset ? 'MEDIA PREVIEW' : 'YOUR NEXT STORY'}</span><strong>{selectedAsset ? selectedAsset.name : <>Make room<br/>for the <em>moment.</em></>}</strong><span className="canvas-caption">{selectedAsset ? loadingAssetId === selectedAsset.id ? 'Restoring media…' : 'Media preview is unavailable on this device.' : 'A new canvas is a blank invitation.'}</span></div></>}
@@ -1236,7 +1638,7 @@ export default function App() {
         </div>
         <div className="transport"><div className="transport-left"><button className="icon-button" title="Go to start" aria-label="Go to start" onClick={() => { setPlaying(false); setPreviewMode('timeline'); setPlayhead(0); }}><span className="skip-start">|◀</span></button><button className="play-button" title="Play / pause · Space" aria-label="Play / pause · Space" onClick={togglePlayback}>{playing ? <Pause size={16} fill="currentColor"/> : <Play size={16} fill="currentColor"/>}</button><button className="icon-button" title="Step forward" aria-label="Step forward" onClick={() => { setPlaying(false); setPreviewMode('timeline'); setPlayhead((time) => Math.min(sequenceDuration, time + 1 / project.canvas.fps)); }}><span className="skip-next">▶|</span></button><span className="transport-time"><strong>{formatTime(playhead)}</strong><span> / {formatTime(sequenceDuration || duration)}</span></span></div><div className="transport-right"><button className="icon-button" title={previewMuted ? 'Unmute preview' : 'Mute preview'} aria-label={previewMuted ? 'Unmute preview' : 'Mute preview'} aria-pressed={previewMuted} onClick={() => setPreviewMuted((muted) => !muted)}><Volume2 size={15} opacity={previewMuted ? .45 : 1}/></button><span className="toolbar-separator"/><button className="icon-button" title="Playback quality"><Gauge size={15}/></button><button className="quality-label">Full quality <ChevronDown size={12}/></button></div></div>
         <section className="timeline">
-          <div className="timeline-header"><div className="timeline-title"><span className="eyebrow">SEQUENCE</span><strong>Timeline</strong><span className="timeline-pill">{project.tracks.length} tracks</span></div><div className="timeline-actions">{selectedClip && <><button className="tool-chip" onClick={splitSelectedClip}><Scissors size={14}/>Split</button><button className="icon-button tiny" title="Duplicate clip · Ctrl D" onClick={duplicateSelectedClip}><Copy size={14}/></button><button className="icon-button tiny" title="Delete clip" onClick={deleteSelectedClip}><Trash2 size={14}/></button></>}<button className="icon-button tiny" title="Timeline settings"><Settings2 size={15}/></button><span className="toolbar-separator"/><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.max(0.5, value - 0.1))} title="Zoom out timeline"><ZoomOut size={15}/></button><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.min(1.5, value + 0.1))} title="Zoom in timeline"><ZoomIn size={15}/></button></div></div>
+          <div className="timeline-header"><div className="timeline-title"><span className="eyebrow">SEQUENCE</span><strong>Timeline</strong><span className="timeline-pill">{project.tracks.length} tracks</span></div><div className="timeline-actions">{selectedClip && <><button className="tool-chip" onClick={splitSelectedClip}><Scissors size={14}/>Split</button><button className="icon-button tiny" title="Duplicate clip · Ctrl D" onClick={duplicateSelectedClip}><Copy size={14}/></button><button className="icon-button tiny" title="Delete clip" onClick={deleteSelectedClip}><Trash2 size={14}/></button></>}<button className={`tool-chip ${timelineSnapEnabled ? 'selected' : ''}`} aria-pressed={timelineSnapEnabled} title="Snap clips to nearby clip edges and playhead" onClick={() => setTimelineSnapEnabled((enabled) => !enabled)}><Magnet size={14}/>Snap</button><button className="icon-button tiny" title="Timeline settings"><Settings2 size={15}/></button><span className="toolbar-separator"/><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.max(0.5, value - 0.1))} title="Zoom out timeline"><ZoomOut size={15}/></button><button className="icon-button tiny" onClick={() => setTimelineZoom((value) => Math.min(1.5, value + 0.1))} title="Zoom in timeline"><ZoomIn size={15}/></button></div></div>
           <div className="track-type-actions" aria-label="Add track">
             <button onClick={() => addTrack('video')}><Film size={13}/>Add video track</button>
             <button onClick={() => addTrack('audio')}><Music2 size={13}/>Add audio track</button>
@@ -1306,6 +1708,7 @@ export default function App() {
       </section>
     </div>}
     {accountOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) { setAccountOpen(false); setOrganizationRequestOpen(false); setSupportTicketOpen(false); } }}><section className={`account-modal ${organizationRequestOpen || supportTicketOpen ? 'account-modal-request' : ''}`} role="dialog" aria-modal="true" aria-labelledby="account-title"><button className="modal-close" aria-label="Close" onClick={() => { setAccountOpen(false); setOrganizationRequestOpen(false); setSupportTicketOpen(false); }}>×</button><div className="modal-mark"><Clapperboard size={18}/></div><span className="eyebrow">FRAMEFORGE ACCOUNT</span><h2 id="account-title">{organizationRequestOpen ? 'Organisation request' : supportTicketOpen ? 'Contact support' : currentUser ? 'Your workspace' : authMode === 'login' ? 'Welcome back' : 'Create your account'}</h2>{currentUser ? organizationRequestOpen ? <OrganizationRequestForm/> : supportTicketOpen ? <SupportTicketForm/> : <><p className="modal-description">Signed in as <strong>{currentUser.email}</strong>. Your project can sync to your account.</p><button className="modal-submit" onClick={saveDraft}>Sync this project</button><button className="modal-secondary" onClick={() => setOrganizationRequestOpen(true)}>Request an organisation</button><button className="modal-secondary" onClick={() => setSupportTicketOpen(true)}>Contact support</button><button className="modal-secondary" onClick={signOut}>Sign out</button></> : <form onSubmit={submitAuth}><p className="modal-description">Sign in to sync your project. Your local draft stays on this device.</p><label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} required minLength={10} maxLength={128} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 10 characters"/></label>{authError && <p className="auth-error" role="alert">{authError}</p>}<button className="modal-submit" disabled={authBusy}>{authBusy ? 'Connecting…' : authMode === 'login' ? 'Sign in and sync' : 'Create account'}</button><button type="button" className="modal-secondary" onClick={() => { setAuthError(''); setAuthMode(authMode === 'login' ? 'register' : 'login'); }}>{authMode === 'login' ? 'New to Frameforge? Create account' : 'Already have an account? Sign in'}</button></form>}</section></div>}
+    {cloudConflict && <div className="modal-backdrop"><section className="account-modal cloud-conflict-modal" role="dialog" aria-modal="true" aria-labelledby="cloud-conflict-title"><div className="modal-mark"><Cloud size={18}/></div><span className="eyebrow">PROJECT SYNC</span><h2 id="cloud-conflict-title">This project changed elsewhere</h2><p className="modal-description" role="alert">{cloudConflict}</p><p className="modal-description">Your current work remains saved as a local draft. Reload the account copy, or replace it after a backup is saved to version history.</p><button className="modal-submit" disabled={resolvingCloudConflict || !cloudProjectId} onClick={() => void reloadCloudConflict()}>{resolvingCloudConflict ? 'Loading…' : 'Reload account version'}</button><button className="modal-secondary" disabled={resolvingCloudConflict || !cloudProjectId} onClick={() => void keepLocalCloudConflict()}>Keep this device version</button><button className="modal-secondary" disabled={resolvingCloudConflict} onClick={keepLocalOnlyAfterConflict}>Keep as local draft only</button></section></div>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button onClick={() => setNotice('')}>Dismiss</button></div>}
   </main>;
 }

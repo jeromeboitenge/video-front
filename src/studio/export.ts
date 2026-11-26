@@ -155,6 +155,11 @@ async function renderImageComposition(project: ProjectDocument): Promise<Blob> {
       context.translate(canvas.width / 2 + layer.x * canvas.width / 100, canvas.height / 2 + layer.y * canvas.height / 100);
       context.rotate(layer.rotation * Math.PI / 180);
       context.scale(layer.scale, layer.scale);
+      if (layer.mask === 'ellipse') {
+        context.beginPath();
+        context.ellipse(0, 0, canvas.width / 2, canvas.height / 2, 0, 0, Math.PI * 2);
+        context.clip();
+      }
       context.beginPath();
       context.rect(
         canvas.width * (layer.cropLeft ?? 0),
@@ -381,7 +386,8 @@ export async function renderProjectVideo(
           }
           if (current) wrapped.push(current);
         }
-        context.textAlign = 'center';
+        const textAlign = overlay.align ?? 'center';
+        context.textAlign = textAlign;
         context.textBaseline = 'middle';
         context.shadowColor = 'rgba(0,0,0,.7)';
         context.shadowBlur = Math.max(2, fontSize * 0.12);
@@ -392,21 +398,29 @@ export async function renderProjectVideo(
           : overlay.position === 'bottom'
             ? canvas.height * 0.86 - contentHeight / 2
             : canvas.height / 2;
+        const captionBoxWidth = Math.min(maxWidth, Math.max(...wrapped.map((line) => context.measureText(line).width)) + fontSize);
+        const captionBoxLeft = textAlign === 'left'
+          ? canvas.width * 0.06
+          : textAlign === 'right'
+            ? canvas.width * 0.94 - captionBoxWidth
+            : (canvas.width - captionBoxWidth) / 2;
         if (overlay.kind === 'caption') {
-          const boxWidth = Math.min(maxWidth, Math.max(...wrapped.map((line) => context.measureText(line).width)) + fontSize);
           context.shadowBlur = 0;
           context.fillStyle = 'rgba(0,0,0,.66)';
-          context.fillRect((canvas.width - boxWidth) / 2, centerY - contentHeight / 2 - fontSize * 0.2, boxWidth, contentHeight + fontSize * 0.4);
+          context.fillRect(captionBoxLeft, centerY - contentHeight / 2 - fontSize * 0.2, captionBoxWidth, contentHeight + fontSize * 0.4);
         }
+        const textX = overlay.kind === 'caption'
+          ? textAlign === 'left' ? captionBoxLeft + fontSize / 2 : textAlign === 'right' ? captionBoxLeft + captionBoxWidth - fontSize / 2 : captionBoxLeft + captionBoxWidth / 2
+          : textAlign === 'left' ? canvas.width * 0.06 : textAlign === 'right' ? canvas.width * 0.94 : canvas.width / 2;
         const outlineWidth = (overlay.outlineWidth ?? 0) * canvas.width / 1080;
         if (outlineWidth > 0) {
           context.strokeStyle = overlay.outlineColor ?? '#111111';
           context.lineWidth = outlineWidth * 2;
           context.lineJoin = 'round';
-          wrapped.forEach((line, index) => context.strokeText(line, canvas.width / 2, centerY - contentHeight / 2 + lineHeight * (index + 0.5), maxWidth));
+          wrapped.forEach((line, index) => context.strokeText(line, textX, centerY - contentHeight / 2 + lineHeight * (index + 0.5), maxWidth));
         }
         context.fillStyle = overlay.color;
-        wrapped.forEach((line, index) => context.fillText(line, canvas.width / 2, centerY - contentHeight / 2 + lineHeight * (index + 0.5), maxWidth));
+        wrapped.forEach((line, index) => context.fillText(line, textX, centerY - contentHeight / 2 + lineHeight * (index + 0.5), maxWidth));
         context.restore();
       }
     };

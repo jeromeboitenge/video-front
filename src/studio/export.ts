@@ -1,6 +1,6 @@
 import { getCloudMediaContent } from './api';
 import { effectStyle, type AppliedEffect, type ColorAdjustment } from './effects';
-import { clipOpacityAt, clipSourceTimeAt, clipTransformAt, clipVisualOpacityAt, MAX_CLIP_SPEED, MIN_CLIP_SPEED, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
+import { clipOpacityAt, clipSourceTimeAt, clipTransformAt, clipVisualOpacityAt, layerType, MAX_CLIP_SPEED, MIN_CLIP_SPEED, textOverlayAnimationAt, type ImageLayer, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
 import { readMedia } from './mediaStore';
 
 type ExportClip = {
@@ -131,6 +131,39 @@ export async function renderEditedImage(asset: MediaAsset, project: ProjectDocum
   }
 }
 
+/** The editor previews ellipse masks with `radial-gradient(ellipse, #000 69%, transparent 70%)`, whose farthest-corner ellipse reaches ~98% of the half box. */
+export const ELLIPSE_MASK_RATIO = 0.695 * Math.SQRT2;
+const layerFont = (layer: Pick<ImageLayer, 'fontFamily' | 'fontWeight' | 'italic'>, size: number) => `${layer.italic ? 'italic ' : ''}${layer.fontWeight ?? 'bold'} ${size}px ${layer.fontFamily ?? 'Manrope'}, ${layer.fontFamily === 'Georgia' ? 'serif' : 'sans-serif'}`;
+
+/** Draws a text or shape layer centered on the current origin, inside a canvas-sized box (width × height). */
+export function drawVectorLayer(context: CanvasRenderingContext2D, layer: ImageLayer, width: number, height: number): void {
+  if (layerType(layer) === 'text') {
+    const size = layer.fontSize ?? 96;
+    const lines = (layer.text ?? '').split('\n');
+    const align = layer.align ?? 'center';
+    context.font = layerFont(layer, size);
+    context.textAlign = align;
+    context.textBaseline = 'middle';
+    context.fillStyle = layer.color ?? '#ffffff';
+    const x = align === 'left' ? -width * 0.44 : align === 'right' ? width * 0.44 : 0;
+    const lineHeight = size * 1.2;
+    lines.forEach((line, index) => context.fillText(line, x, -lines.length * lineHeight / 2 + lineHeight * (index + 0.5)));
+    return;
+  }
+  const w = width * (layer.width ?? 50) / 100;
+  const h = height * (layer.height ?? 30) / 100;
+  context.beginPath();
+  if (layer.shape === 'ellipse') context.ellipse(0, 0, w / 2, h / 2, 0, 0, Math.PI * 2);
+  else context.rect(-w / 2, -h / 2, w, h);
+  context.fillStyle = layer.fill ?? '#ad7dff';
+  context.fill();
+  if ((layer.strokeWidth ?? 0) > 0) {
+    context.lineWidth = layer.strokeWidth ?? 0;
+    context.strokeStyle = layer.stroke ?? '#ffffff';
+    context.stroke();
+  }
+}
+
 async function renderImageComposition(project: ProjectDocument): Promise<Blob> {
   const canvas = document.createElement('canvas');
   canvas.width = project.canvas.width;
@@ -140,14 +173,12 @@ async function renderImageComposition(project: ProjectDocument): Promise<Blob> {
   const assets = new Map(project.assets.map((asset) => [asset.id, asset]));
   for (const layer of project.imageLayers) {
     if (!layer.visible) continue;
-    const asset = assets.get(layer.assetId);
-    if (!asset) continue;
-    const bitmap = await createImageBitmap(await loadAsset(asset, new AbortController().signal));
+    const type = layerType(layer);
+    const asset = type === 'image' && layer.assetId ? assets.get(layer.assetId) : undefined;
+    if (type === 'image' && !asset) continue;
+    const bitmap = asset ? await createImageBitmap(await loadAsset(asset, new AbortController().signal)) : undefined;
     try {
-      const ratio = Math.min(canvas.width / bitmap.width, canvas.height / bitmap.height);
-      const width = bitmap.width * ratio;
-      const height = bitmap.height * ratio;
-      const effect = effectStyle(project.effects, asset.id, project.colorAdjustments[asset.id]);
+      const effect = asset ? effectStyle(project.effects, asset.id, project.colorAdjustments[asset.id]) : { filter: undefined, vignette: 0 };
       context.save();
       context.globalAlpha = layer.opacity;
       context.globalCompositeOperation = layer.blendMode === 'normal' ? 'source-over' : layer.blendMode;
@@ -157,18 +188,22 @@ async function renderImageComposition(project: ProjectDocument): Promise<Blob> {
       context.scale(layer.scale, layer.scale);
       if (layer.mask === 'ellipse') {
         context.beginPath();
-        context.ellipse(0, 0, canvas.width / 2, canvas.height / 2, 0, 0, Math.PI * 2);
+        context.ellipse(0, 0, canvas.width / 2 * ELLIPSE_MASK_RATIO, canvas.height / 2 * ELLIPSE_MASK_RATIO, 0, 0, Math.PI * 2);
         context.clip();
       }
+      // Crop insets are relative to the layer's canvas-sized box, whose origin is its center here.
       context.beginPath();
       context.rect(
-        canvas.width * (layer.cropLeft ?? 0),
-        canvas.height * (layer.cropTop ?? 0),
+        canvas.width * ((layer.cropLeft ?? 0) - 0.5),
+        canvas.height * ((layer.cropTop ?? 0) - 0.5),
         canvas.width * (1 - (layer.cropLeft ?? 0) - (layer.cropRight ?? 0)),
         canvas.height * (1 - (layer.cropTop ?? 0) - (layer.cropBottom ?? 0)),
       );
       context.clip();
-      context.drawImage(bitmap, -width / 2, -height / 2, width, height);
+      if (bitmap) {
+        const ratio = Math.min(canvas.width / bitmap.width, canvas.height / bitmap.height);
+        context.drawImage(bitmap, -bitmap.width * ratio / 2, -bitmap.height * ratio / 2, bitmap.width * ratio, bitmap.height * ratio);
+      } else drawVectorLayer(context, layer, canvas.width, canvas.height);
       context.restore();
       if (effect.vignette > 0) {
         const gradient = context.createRadialGradient(canvas.width / 2, canvas.height / 2, canvas.height * 0.16, canvas.width / 2, canvas.height / 2, canvas.height * 0.72);
@@ -178,7 +213,7 @@ async function renderImageComposition(project: ProjectDocument): Promise<Blob> {
         context.fillRect(0, 0, canvas.width, canvas.height);
       }
     } finally {
-      bitmap.close();
+      bitmap?.close();
     }
   }
   return await new Promise<Blob>((resolve, reject) => {
@@ -369,6 +404,11 @@ export async function renderProjectVideo(
         if (time < overlay.start || time >= overlay.start + overlay.duration) continue;
         const fontSize = Math.round(overlay.fontSize * canvas.width / 1080);
         context.save();
+        const motion = textOverlayAnimationAt(overlay, time);
+        context.globalAlpha = motion.opacity;
+        context.translate(canvas.width / 2, canvas.height / 2 + motion.offsetY * canvas.height);
+        context.scale(motion.scale, motion.scale);
+        context.translate(-canvas.width / 2, -canvas.height / 2);
         const fontFamily = overlay.fontFamily ?? 'Manrope';
         const fontWeight = overlay.fontWeight ?? 'bold';
         context.font = `${overlay.italic ? 'italic ' : ''}${fontWeight} ${fontSize}px ${fontFamily}, sans-serif`;

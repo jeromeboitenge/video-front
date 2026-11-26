@@ -17,16 +17,17 @@ Status reflects implemented code and verification evidence from 2026-11-26. The 
 ```bash
 npm test            # 73 tests
 npm run build       # type check + production build
-npm run test:e2e    # full browser workflow against API, database and renderer
+npm run test:e2e    # 2 browser tests: full account workflow with server renders; browser WebM/PNG exports
 ```
 
 ## Fixed during this phase
 
 - Saving and refreshing immediately could reopen an older project, because only the 600 ms debounced autosave updated the restore slot. Save now writes it directly, and pending edits are flushed when the page is hidden.
 - Browser PNG export cropped image layers from the wrong origin, so the export didn't match the preview.
+- Browser WebM exports had no duration header (players showed no length and could not seek); the duration is now written after recording.
 
 ## Known limitations
 
-- The in-browser WebM exporter renders in real time and depends on browser codec support. It is covered by unit tests, not by the browser E2E (which uses server rendering).
+- The in-browser WebM exporter renders in real time and depends on browser codec support. The browser E2E verifies it in Chrome (VP9 + Opus, full canvas size, duration header, audible audio) and verifies the browser PNG export.
 - Text layers in the browser use web fonts (Manrope via Google Fonts); the server falls back to system fonts unless Manrope is installed.
 - No multi-select, ripple edits, transition library, masks beyond ellipse, brushes or selections.

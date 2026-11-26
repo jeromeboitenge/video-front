@@ -165,3 +165,40 @@ test('a creator edits, saves, reopens and exports a project end to end', async (
 
   expect(errors).toEqual([]);
 });
+
+test('browser-side WebM and PNG exports produce valid files without an account', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.goto('/');
+  await page.locator('input[type=file]').first().setInputFiles([join(fixtures, 'clip.mp4'), join(fixtures, 'photo.png')]);
+  const timeline = page.locator('.timeline-content');
+  await expect(timeline.getByRole('button', { name: /photo\.png/ })).toHaveCount(1);
+
+  // Browser PNG: export the selected image with an effect applied.
+  await page.locator('.asset-row').filter({ hasText: 'photo.png' }).click();
+  await page.getByRole('button', { name: 'Effects' }).click();
+  await page.getByRole('button', { name: 'Add Monochrome' }).click();
+  await page.getByLabel('Monochrome intensity').fill('100');
+  const pngDownload = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export edited image (PNG)' }).click();
+  const pngPath = join(dataDir, 'downloads', 'browser.png');
+  await (await pngDownload).saveAs(pngPath);
+  const png = inspect(pngPath);
+  expect(png).toMatchObject({ kind: 'image', format: 'PNG' });
+  const [r, g, b] = png.center as number[];
+  expect(Math.max(r, g, b) - Math.min(r, g, b)).toBeLessThan(4); // monochrome applied
+
+  // Browser WebM: real-time render of the timeline (video clip, then image clip).
+  await page.getByRole('button', { name: 'Export', exact: true }).click();
+  const webmDownload = page.waitForEvent('download', { timeout: 120_000 });
+  await page.getByRole('button', { name: 'Render video (.webm)' }).click();
+  const webmPath = join(dataDir, 'downloads', 'browser.webm');
+  await (await webmDownload).saveAs(webmPath);
+  const webm = inspect(webmPath);
+  expect(webm).toMatchObject({ has_video: true, width: 1080, height: 1920 });
+  expect(['vp8', 'vp9']).toContain(webm.video_codec);
+  expect(webm).toMatchObject({ has_audio: true, audio_codec: 'opus' });
+  expect(Number(webm.duration)).toBeGreaterThan(7); // 4 s video + 4 s image; duration header present
+  expect(Number(webm.mean_volume_db)).toBeGreaterThan(-60);
+  expect(errors).toEqual([]);
+});

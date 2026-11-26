@@ -25,3 +25,6 @@
 .export-progress-bar{height:4px;border-radius:2px;background:#2b2c33;overflow:hidden}.export-progress-bar i{display:block;height:100%;background:#ad91f5;transition:width .3s}
 .server-export-actions{display:flex;gap:4px}.server-export-actions button{display:flex;align-items:center;gap:4px;padding:4px 7px;border:1px solid #3a3b42;border-radius:4px;background:#24252b;color:#e5e3e9;font-size:9px;cursor:pointer}
 .server-export-actions button:hover{background:#2f3038}
+.server-export-preset{display:flex;flex-direction:column;gap:4px;margin-bottom:8px;color:#92919a;font-size:9px}.server-export-preset select{height:30px;padding:0 6px;border:1px solid #4a3f66;border-radius:4px;background:#1d1a26;color:#efe9fb;font-size:10px}
+.server-export-warning{margin:0 0 8px;padding:6px 8px;border-radius:4px;background:#3a2f1c;color:#f3d39a;font-size:9px;line-height:1.5}
+.server-export-summary{margin:0 0 8px;color:#9a99a3;font:9px 'DM Mono',monospace}

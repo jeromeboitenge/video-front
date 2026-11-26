@@ -29,7 +29,8 @@ describe('video export plan', () => {
     expect(context.translate).toHaveBeenCalledWith(540 + 108, 960 - 96);
     expect(context.rotate).toHaveBeenCalledWith(15 * Math.PI / 180);
     expect(context.scale).toHaveBeenCalledWith(1.2, 1.2);
-    expect(context.rect).toHaveBeenCalledWith(108, 0, 972, 1920);
+    // Crop insets are measured from the layer box edges; the origin is the box center after translate.
+    expect(context.rect).toHaveBeenCalledWith(-432, -960, 972, 1920);
     expect(context.clip).toHaveBeenCalledOnce();
     expect(drawImage).toHaveBeenCalled();
     vi.unstubAllGlobals();

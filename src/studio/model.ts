@@ -6,8 +6,34 @@ export type MediaAsset = { id: string; name: string; kind: 'video' | 'image' | '
 export type VisualTransform = { x: number; y: number; scale: number; rotation: number; opacity: number };
 export type ClipKeyframe = VisualTransform & { time: number };
 export type TimelineClip = { id: string; assetId: string; trackId: string; start: number; duration: number; sourceOffset: number; speed?: number; volume?: number; x?: number; y?: number; scale?: number; rotation?: number; opacity?: number; keyframes?: ClipKeyframe[]; transitionIn?: number; transitionOut?: number };
-export type TextOverlay = { id: string; kind: 'title' | 'caption'; text: string; start: number; duration: number; position: 'top' | 'center' | 'bottom'; fontSize: number; color: string; fontFamily?: 'Manrope' | 'Arial' | 'Georgia'; fontWeight?: 'normal' | 'bold'; italic?: boolean; align?: 'left' | 'center' | 'right'; outlineColor?: string; outlineWidth?: number };
-export type ImageLayer = { id: string; assetId: string; name: string; visible: boolean; locked: boolean; opacity: number; blendMode: 'normal' | 'multiply' | 'screen' | 'overlay'; mask?: 'none' | 'ellipse'; x: number; y: number; scale: number; rotation: number; cropLeft: number; cropTop: number; cropRight: number; cropBottom: number };
+export type TextAnimation = 'none' | 'fade' | 'slide-up' | 'zoom';
+export const TEXT_ANIMATIONS: { id: TextAnimation; label: string }[] = [{ id: 'none', label: 'None' }, { id: 'fade', label: 'Fade in & out' }, { id: 'slide-up', label: 'Slide up' }, { id: 'zoom', label: 'Zoom in' }];
+export type TextOverlay = { id: string; kind: 'title' | 'caption'; text: string; start: number; duration: number; position: 'top' | 'center' | 'bottom'; fontSize: number; color: string; fontFamily?: 'Manrope' | 'Arial' | 'Georgia'; fontWeight?: 'normal' | 'bold'; italic?: boolean; align?: 'left' | 'center' | 'right'; outlineColor?: string; outlineWidth?: number; animation?: TextAnimation };
+export type ImageLayerType = 'image' | 'text' | 'shape';
+/** Image editor layer. Image layers reference an image asset; text and shape layers are drawn in a canvas-sized box. */
+export type ImageLayer = {
+  id: string; type?: ImageLayerType; assetId?: string; name: string; visible: boolean; locked: boolean; opacity: number; blendMode: 'normal' | 'multiply' | 'screen' | 'overlay'; mask?: 'none' | 'ellipse';
+  x: number; y: number; scale: number; rotation: number; cropLeft: number; cropTop: number; cropRight: number; cropBottom: number;
+  text?: string; fontSize?: number; color?: string; fontFamily?: 'Manrope' | 'Arial' | 'Georgia'; fontWeight?: 'normal' | 'bold'; italic?: boolean; align?: 'left' | 'center' | 'right';
+  shape?: 'rectangle' | 'ellipse'; fill?: string; stroke?: string; strokeWidth?: number; width?: number; height?: number;
+};
+export const layerType = (layer: ImageLayer): ImageLayerType => layer.type ?? 'image';
+const HEX_COLOR = /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/;
+const optionalColor = (value: unknown) => value === undefined || (typeof value === 'string' && HEX_COLOR.test(value));
+const optionalRange = (value: unknown, min: number, max: number) => value === undefined || (typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max);
+
+/** Entrance/exit animation state for a title or caption: opacity, vertical offset (fraction of canvas height), and scale. */
+export function textOverlayAnimationAt(overlay: TextOverlay, time: number): { opacity: number; offsetY: number; scale: number } {
+  const animation = overlay.animation ?? 'none';
+  if (animation === 'none') return { opacity: 1, offsetY: 0, scale: 1 };
+  const length = Math.min(0.5, overlay.duration / 3);
+  const local = time - overlay.start;
+  const progress = length > 0 ? Math.max(0, Math.min(1, Math.min(local, overlay.duration - local) / length)) : 1;
+  const eased = 1 - (1 - progress) ** 3;
+  if (animation === 'fade') return { opacity: eased, offsetY: 0, scale: 1 };
+  if (animation === 'slide-up') return { opacity: eased, offsetY: (1 - eased) * 0.06, scale: 1 };
+  return { opacity: eased, offsetY: 0, scale: 0.6 + 0.4 * eased };
+}
 export type ProjectDocument = { version: 1; project: { id: string; name: string }; canvas: { width: number; height: number; fps: number; background: string }; tracks: Track[]; clips: TimelineClip[]; assets: MediaAsset[]; imageLayers: ImageLayer[]; effects: AppliedEffect[]; colorAdjustments: Record<string, ColorAdjustment>; textOverlays: TextOverlay[]; settings: Record<string, unknown> };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -69,19 +95,25 @@ export function parseProjectDocument(value: unknown): ProjectDocument {
     !Array.isArray(document.assets) ||
     !document.assets.every((asset) => isRecord(asset) && typeof asset.id === 'string' && typeof asset.name === 'string' && ['video', 'image', 'audio'].includes(String(asset.kind)) && typeof asset.mimeType === 'string' && Number.isFinite(asset.size) && (asset.cloudId === undefined || typeof asset.cloudId === 'string')) ||
     (document.effects !== undefined && (!Array.isArray(document.effects) || !document.effects.every((effect) => isRecord(effect) && typeof effect.id === 'string' && typeof effect.assetId === 'string' && assets.some((asset) => isRecord(asset) && asset.id === effect.assetId) && ['vivid', 'monochrome', 'vintage', 'soft-focus', 'warm-glow', 'cool-tone', 'vignette'].includes(String(effect.type)) && typeof effect.strength === 'number' && Number.isFinite(effect.strength) && effect.strength >= 0 && effect.strength <= 100 && typeof effect.enabled === 'boolean'))) ||
-    (document.textOverlays !== undefined && (!Array.isArray(document.textOverlays) || !document.textOverlays.every((overlay) => isRecord(overlay) && typeof overlay.id === 'string' && ['title', 'caption'].includes(String(overlay.kind)) && typeof overlay.text === 'string' && overlay.text.trim().length > 0 && Number.isFinite(overlay.start) && Number(overlay.start) >= 0 && Number.isFinite(overlay.duration) && Number(overlay.duration) > 0 && ['top', 'center', 'bottom'].includes(String(overlay.position)) && Number.isFinite(overlay.fontSize) && Number(overlay.fontSize) >= 14 && Number(overlay.fontSize) <= 160 && typeof overlay.color === 'string' && (overlay.fontFamily === undefined || ['Manrope', 'Arial', 'Georgia'].includes(String(overlay.fontFamily))) && (overlay.fontWeight === undefined || ['normal', 'bold'].includes(String(overlay.fontWeight))) && (overlay.italic === undefined || typeof overlay.italic === 'boolean') && (overlay.align === undefined || ['left', 'center', 'right'].includes(String(overlay.align))) && (overlay.outlineColor === undefined || typeof overlay.outlineColor === 'string') && (overlay.outlineWidth === undefined || (Number.isFinite(overlay.outlineWidth) && Number(overlay.outlineWidth) >= 0 && Number(overlay.outlineWidth) <= 12))))) ||
+    (document.textOverlays !== undefined && (!Array.isArray(document.textOverlays) || !document.textOverlays.every((overlay) => isRecord(overlay) && typeof overlay.id === 'string' && ['title', 'caption'].includes(String(overlay.kind)) && typeof overlay.text === 'string' && overlay.text.trim().length > 0 && Number.isFinite(overlay.start) && Number(overlay.start) >= 0 && Number.isFinite(overlay.duration) && Number(overlay.duration) > 0 && ['top', 'center', 'bottom'].includes(String(overlay.position)) && Number.isFinite(overlay.fontSize) && Number(overlay.fontSize) >= 14 && Number(overlay.fontSize) <= 160 && typeof overlay.color === 'string' && (overlay.fontFamily === undefined || ['Manrope', 'Arial', 'Georgia'].includes(String(overlay.fontFamily))) && (overlay.fontWeight === undefined || ['normal', 'bold'].includes(String(overlay.fontWeight))) && (overlay.italic === undefined || typeof overlay.italic === 'boolean') && (overlay.align === undefined || ['left', 'center', 'right'].includes(String(overlay.align))) && (overlay.outlineColor === undefined || typeof overlay.outlineColor === 'string') && (overlay.outlineWidth === undefined || (Number.isFinite(overlay.outlineWidth) && Number(overlay.outlineWidth) >= 0 && Number(overlay.outlineWidth) <= 12)) && (overlay.animation === undefined || TEXT_ANIMATIONS.some((item) => item.id === overlay.animation))))) ||
     (document.colorAdjustments !== undefined && (!isRecord(document.colorAdjustments) || Object.entries(document.colorAdjustments).some(([assetId, adjustment]) => !assets.some((asset) => isRecord(asset) && asset.id === assetId) || !isRecord(adjustment) || colorAdjustmentFields.some((field) => !Number.isFinite(adjustment[field]) || Number(adjustment[field]) < -100 || Number(adjustment[field]) > 100)))) ||
     (document.imageLayers !== undefined && (!Array.isArray(document.imageLayers) || !document.imageLayers.every((layer) => {
       if (!isRecord(layer)) return false;
       const crop = layer as Record<string, unknown>;
-      return typeof layer.id === 'string' && typeof layer.assetId === 'string' && assets.some((asset) => isRecord(asset) && asset.id === layer.assetId && asset.kind === 'image') && typeof layer.name === 'string' && typeof layer.visible === 'boolean' && typeof layer.locked === 'boolean' && Number.isFinite(layer.opacity) && Number(layer.opacity) >= 0 && Number(layer.opacity) <= 1 && ['normal', 'multiply', 'screen', 'overlay'].includes(String(layer.blendMode)) && (layer.mask === undefined || ['none', 'ellipse'].includes(String(layer.mask))) && Number.isFinite(layer.x) && Number.isFinite(layer.y) && Number.isFinite(layer.scale) && Number(layer.scale) >= 0.1 && Number(layer.scale) <= 5 && Number.isFinite(layer.rotation) && ['cropLeft', 'cropTop', 'cropRight', 'cropBottom'].every((field) => { const value = crop[field]; return value === undefined || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 0.9); }) && Number(crop.cropLeft ?? 0) + Number(crop.cropRight ?? 0) < 1 && Number(crop.cropTop ?? 0) + Number(crop.cropBottom ?? 0) < 1;
+      const type = layer.type ?? 'image';
+      const content = type === 'image'
+        ? typeof layer.assetId === 'string' && assets.some((asset) => isRecord(asset) && asset.id === layer.assetId && asset.kind === 'image')
+        : type === 'text'
+          ? typeof layer.text === 'string' && layer.text.trim().length > 0 && layer.text.length <= 2000 && optionalRange(layer.fontSize, 8, 1000) && optionalColor(layer.color) && (layer.fontFamily === undefined || ['Manrope', 'Arial', 'Georgia'].includes(String(layer.fontFamily))) && (layer.fontWeight === undefined || ['normal', 'bold'].includes(String(layer.fontWeight))) && (layer.italic === undefined || typeof layer.italic === 'boolean') && (layer.align === undefined || ['left', 'center', 'right'].includes(String(layer.align)))
+          : type === 'shape' && ['rectangle', 'ellipse'].includes(String(layer.shape)) && optionalColor(layer.fill) && optionalColor(layer.stroke) && optionalRange(layer.strokeWidth, 0, 200) && optionalRange(layer.width, 1, 100) && optionalRange(layer.height, 1, 100);
+      return typeof layer.id === 'string' && content && typeof layer.name === 'string' && typeof layer.visible === 'boolean' && typeof layer.locked === 'boolean' && Number.isFinite(layer.opacity) && Number(layer.opacity) >= 0 && Number(layer.opacity) <= 1 && ['normal', 'multiply', 'screen', 'overlay'].includes(String(layer.blendMode)) && (layer.mask === undefined || ['none', 'ellipse'].includes(String(layer.mask))) && Number.isFinite(layer.x) && Number.isFinite(layer.y) && Number.isFinite(layer.scale) && Number(layer.scale) >= 0.1 && Number(layer.scale) <= 5 && Number.isFinite(layer.rotation) && ['cropLeft', 'cropTop', 'cropRight', 'cropBottom'].every((field) => { const value = crop[field]; return value === undefined || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 0.9); }) && Number(crop.cropLeft ?? 0) + Number(crop.cropRight ?? 0) < 1 && Number(crop.cropTop ?? 0) + Number(crop.cropBottom ?? 0) < 1;
     }))) ||
     !document.settings ||
     !isRecord(document.settings)
   ) {
     throw new Error('This project document is not a supported Frameforge version.');
   }
-  return { ...document, imageLayers: (document.imageLayers ?? []).map((layer) => Object.assign({ cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0, mask: 'none' }, layer)), effects: document.effects ?? [], colorAdjustments: document.colorAdjustments ?? {}, textOverlays: document.textOverlays ?? [] } as ProjectDocument;
+  return { ...document, imageLayers: (document.imageLayers ?? []).map((layer) => Object.assign({ type: 'image', cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0, mask: 'none' }, layer)), effects: document.effects ?? [], colorAdjustments: document.colorAdjustments ?? {}, textOverlays: document.textOverlays ?? [] } as ProjectDocument;
 }
 
 export const makeProject = (): ProjectDocument => ({

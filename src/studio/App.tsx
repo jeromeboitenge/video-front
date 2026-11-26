@@ -1774,7 +1774,7 @@ export default function App() {
         <button className="modal-secondary" onClick={downloadProjectFile} disabled={exporting}>Download editable project (.frameforge.json)</button>
         {exporting && <div className="export-progress" aria-label="Export progress"><div><i style={{ width: `${Math.round(exportProgress * 100)}%` }}/></div><span>{Math.round(exportProgress * 100)}%</span><button className="modal-secondary" onClick={() => exportAbort.current?.abort()}>Cancel render</button></div>}
         {exportError && <p className="export-error" role="alert">{exportError}</p>}
-        <ServerExportPanel project={project} signedIn={!!currentUser} cloudProjectId={cloudProjectId || undefined} selectedImageAssetId={selectedAsset?.kind === 'image' ? selectedAsset.id : undefined} saveToCloud={(document) => persistCloudProject(document)} onProjectChange={commit} onDownload={downloadExport}/>
+        <ServerExportPanel project={project} signedIn={!!currentUser} playhead={playhead} cloudProjectId={cloudProjectId || undefined} selectedImageAssetId={selectedAsset?.kind === 'image' ? selectedAsset.id : undefined} saveToCloud={(document) => persistCloudProject(document)} onProjectChange={commit} onDownload={downloadExport}/>
         <p className="export-note">Browser WebM rendering runs in real time and includes timeline video, images, audio, text overlays, fades, and supported effects. AI generation requires an external provider and is not included.</p>
       </section>
     </div>}

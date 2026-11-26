@@ -28,3 +28,6 @@
   .timeline-header{height:36px}
   .timeline-footer{height:24px}
 }
+.clip-filmstrip{position:absolute;inset:0;display:flex;overflow:hidden;opacity:.5;pointer-events:none;z-index:0}.clip-filmstrip img{flex:1 1 0;min-width:0;height:100%;object-fit:cover;border-right:1px solid #0006}
+.clip-filmstrip-image{background-size:auto 100%;background-repeat:repeat-x}
+.clip>*:not(.clip-filmstrip):not(.clip-trim-handle){position:relative;z-index:1}

@@ -176,6 +176,11 @@ test('browser-side WebM and PNG exports produce valid files without an account',
   await page.locator('input[type=file]').first().setInputFiles([join(fixtures, 'clip.mp4'), join(fixtures, 'photo.png')]);
   const timeline = page.locator('.timeline-content');
   await expect(timeline.getByRole('button', { name: /photo\.png/ })).toHaveCount(1);
+  // Filmstrip thumbnails decoded from the real video, and the image shown on its clip.
+  await expect(timeline.getByRole('button', { name: /clip\.mp4/ }).locator('.clip-filmstrip img').first()).toBeVisible();
+  expect(await timeline.getByRole('button', { name: /clip\.mp4/ }).locator('.clip-filmstrip img').first().getAttribute('src')).toMatch(/^data:image\/jpeg/);
+  await expect(timeline.getByRole('button', { name: /photo\.png/ }).locator('.clip-filmstrip-image')).toBeVisible();
+  if (process.env.E2E_SCREENSHOTS) await page.locator('.timeline').screenshot({ path: join(process.env.E2E_SCREENSHOTS, 'timeline.png') });
 
   // Browser PNG: export the selected image with an effect applied.
   await page.locator('.asset-row').filter({ hasText: 'photo.png' }).click();

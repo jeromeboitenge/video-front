@@ -1,24 +1,32 @@
 # Frontend development status
 
-This is the frontend repository. It communicates with the independently deployable API through the versioned client in `src/studio/api.ts`.
+Status reflects implemented code and verification evidence from 2026-11-26. The editor talks to the API through `src/studio/api.ts`.
 
-| Feature | Frontend | Backend | Database | Tests | Status |
-|---|---|---|---|---|---|
-| Authentication | Login/register UI, access-token requests, account refresh | Auth endpoints and roles exist | User records | UI/API tests exist; end-to-end runtime not verified here | Partial |
-| Project persistence | Local autosave/recovery, cloud list/open/save/delete, local draft deletion, project duplication, save/list/restore cloud versions, and conflict resolution | Owner-scoped project/version endpoints with typed image-layer validation, relational layer sync, and revision-checked updates | Project JSON, relational image-layer rows, version snapshots, and project revisions | Existing UI tests cover cloud project flows; local draft deletion and revision conflict flows not yet independently verified; HTTP transport remains unverified | Partial |
-| Media | Browser import, IndexedDB cache, cloud upload/lazy restore, account media browsing, add cloud media to a project, and delete uploaded copy while preserving local project media | Authenticated upload/list/content/delete endpoints | Media metadata rows; local-disk file storage | Existing UI/API tests cover upload/restore; new cloud browser/add flow not yet independently verified | Partial |
-| Video editing | Multitrack timeline, move/trim/split, transforms/keyframes, captions, text styling and alignment, effects, audio controls | No server-side rendering implementation | Editing project document persisted | Existing text coverage; alignment behavior has not yet been verified | Partial |
-| Image Studio | Layer stack, direct canvas move, crop insets, transforms, visibility/lock/order, opacity, blend modes, ellipse layer masks, PNG output | Layer contract validates, persists in project documents, and mirrors to relational rows on create/save | Project JSON plus `project_image_layers` projection table; migration 0009 stores masks | Existing image-layer coverage; mask behavior has not yet been verified | Partial |
-| Audio/video export | Browser WebM and image PNG renderers | No server render jobs or export download endpoint | No export history records | Renderer tests cover browser output plans | Partial |
-| AI, masks, brushes, selection, advanced retouching | Not implemented | No provider or processing services | None | None | Planned |
+| Feature | Frontend | Verification | Status |
+|---|---|---|---|
+| Authentication | Login/register, session token, account menu, error messages | Component tests; browser E2E against the real API | Implemented |
+| Projects | Local autosave (debounced, flushed on page hide), recovery after refresh, rename, duplicate, new, delete with confirmation; account save/open/delete, cloud autosave, conflict resolution, versions | Component tests; E2E save → refresh → reopen from account → delete | Implemented |
+| Media | Import video/image/audio, IndexedDB cache, upload to account, lazy restore, account media browser, delete uploaded copy | E2E upload of MP4/PNG/WAV; component tests | Implemented |
+| Video editing | Multitrack timeline, move/trim/split/duplicate/delete, snapping, speed, volume, fades, transforms/keyframes, effects, color, titles/captions with animations, SRT/WebVTT | Component and model tests; E2E split/delete/effect/title | Implemented |
+| Image Studio | Image, text and shape layers; reorder, visibility, lock, duplicate; move/resize on canvas; transforms, opacity, blend modes, crop, ellipse mask; text and shape properties | Component tests; E2E text/shape layers persisted and rendered | Implemented |
+| Export | Server render panel (MP4/WebM/PNG/JPEG/WebP/M4A/WAV, resolution, quality, audio toggle) uploads local-only media, saves, queues, polls progress, cancels, downloads; browser WebM and PNG export; editable project download | Component tests with mocked API; E2E server renders downloaded and inspected | Implemented |
+| AI tools, brushes, selections, retouching | Not implemented (AI panel says so) | — | Planned |
 
 ## Verification
 
-The latest frontend production build passed. Focused editor and export tests passed, including image-layer editing, PNG crop rendering, and cloud project layer restoration. Backend direct route/database tests and Alembic migration pass; HTTP transport is not marked verified because API health requests hang in the current Python runtime.
+```bash
+npm test            # 73 tests
+npm run build       # type check + production build
+npm run test:e2e    # full browser workflow against API, database and renderer
+```
 
-## Next frontend work
+## Fixed during this phase
 
-1. Keep cloud project load/save behavior aligned with backend project schemas and error states.
-2. Expand Image Studio masks and selection workflows, then add brush operations with matching export behavior.
-3. Integrate server-side export job creation/progress/download once the backend rendering service exists.
-4. Add end-to-end tests against a running backend and persistent database.
+- Saving and refreshing immediately could reopen an older project, because only the 600 ms debounced autosave updated the restore slot. Save now writes it directly, and pending edits are flushed when the page is hidden.
+- Browser PNG export cropped image layers from the wrong origin, so the export didn't match the preview.
+
+## Known limitations
+
+- The in-browser WebM exporter renders in real time and depends on browser codec support. It is covered by unit tests, not by the browser E2E (which uses server rendering).
+- Text layers in the browser use web fonts (Manrope via Google Fonts); the server falls back to system fonts unless Manrope is installed.
+- No multi-select, ripple edits, transition library, masks beyond ellipse, brushes or selections.

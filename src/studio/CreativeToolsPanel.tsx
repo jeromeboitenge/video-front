@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Captions, FileUp, Plus, Sparkles, Trash2 } from 'lucide-react';
-import type { TextOverlay, TimelineClip, ToolId } from './model';
+import { TEXT_ANIMATIONS, type TextOverlay, type TimelineClip, type ToolId } from './model';
 import { parseSubRip, parseWebVtt, serializeSubRip, serializeWebVtt } from './subtitles';
 
 type CreativeTool = Extract<ToolId, 'text' | 'captions' | 'transitions' | 'ai'>;
@@ -30,6 +30,7 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
   const [color, setColor] = useState('#ffffff');
   const [outlineColor, setOutlineColor] = useState('#111111');
   const [outlineWidth, setOutlineWidth] = useState('0');
+  const [animation, setAnimation] = useState<NonNullable<TextOverlay['animation']>>('none');
   const [fileError, setFileError] = useState('');
   const [formError, setFormError] = useState('');
 
@@ -78,6 +79,7 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
       italic,
       outlineColor,
       outlineWidth: strokeWidth,
+      animation,
     }]);
     setText('');
   }
@@ -165,7 +167,7 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
       </div>
       <div className="creative-form-row">
         <label>Alignment<select aria-label="Text alignment" value={align} onChange={(event) => setAlign(event.target.value as NonNullable<TextOverlay['align']>)}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
-        <span />
+        <label>Animation<select aria-label="Text animation" value={animation} onChange={(event) => setAnimation(event.target.value as NonNullable<TextOverlay['animation']>)}>{TEXT_ANIMATIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
       </div>
       <div className="creative-form-row">
         <label>Font<select value={fontFamily} onChange={(event) => setFontFamily(event.target.value as NonNullable<TextOverlay['fontFamily']>)}><option value="Manrope">Manrope</option><option value="Arial">Arial</option><option value="Georgia">Georgia</option></select></label>
@@ -203,7 +205,7 @@ export function CreativeToolsPanel({ tool, overlays, playhead, selectedClip, onA
         <label>Position<select aria-label={`Position for ${overlay.text}`} value={overlay.position} onChange={(event) => onUpdateOverlay({ ...overlay, position: event.target.value as TextOverlay['position'] })}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
         <label>Alignment<select aria-label={`Alignment for ${overlay.text}`} value={overlay.align ?? 'center'} onChange={(event) => onUpdateOverlay({ ...overlay, align: event.target.value as NonNullable<TextOverlay['align']> })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
       </div>
-      <div className="creative-form-row"><label>Weight<select aria-label={`Weight for ${overlay.text}`} value={overlay.fontWeight ?? 'bold'} onChange={(event) => onUpdateOverlay({ ...overlay, fontWeight: event.target.value as NonNullable<TextOverlay['fontWeight']> })}><option value="normal">Regular</option><option value="bold">Bold</option></select></label><span /></div>
+      <div className="creative-form-row"><label>Weight<select aria-label={`Weight for ${overlay.text}`} value={overlay.fontWeight ?? 'bold'} onChange={(event) => onUpdateOverlay({ ...overlay, fontWeight: event.target.value as NonNullable<TextOverlay['fontWeight']> })}><option value="normal">Regular</option><option value="bold">Bold</option></select></label><label>Animation<select aria-label={`Animation for ${overlay.text}`} value={overlay.animation ?? 'none'} onChange={(event) => onUpdateOverlay({ ...overlay, animation: event.target.value as NonNullable<TextOverlay['animation']> })}>{TEXT_ANIMATIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label></div>
       <label className="creative-check"><input aria-label={`Italic for ${overlay.text}`} type="checkbox" checked={overlay.italic ?? false} onChange={(event) => onUpdateOverlay({ ...overlay, italic: event.target.checked })}/> Italic</label>
     </section>)}</div> : <div className="creative-empty">Nothing here yet. Add one above.</div>}
   </div>;

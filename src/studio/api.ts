@@ -177,3 +177,43 @@ export async function saveCloudProject(name: string, document: unknown, id?: str
     body: JSON.stringify({ name, document, ...(id && expectedRevision ? { expected_revision: expectedRevision } : {}) }),
   });
 }
+
+export type RenderKind = 'video' | 'image' | 'audio';
+export type RenderFormat = 'mp4' | 'webm' | 'png' | 'jpeg' | 'webp' | 'm4a' | 'wav';
+export type RenderRequest = { kind: RenderKind; format: RenderFormat; resolution?: number; quality?: 'high' | 'standard' | 'draft'; fps?: number; include_audio?: boolean; asset_id?: string; background?: 'transparent' | 'canvas' };
+export type RenderJob = {
+  id: string; project_id: string; project_revision: number; kind: RenderKind; output_format: RenderFormat; options: Record<string, unknown>;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; progress: number; error: string | null;
+  output_size: number | null; output_mime: string | null; output_name: string | null; output_info: Record<string, unknown> | null;
+  created_at: string; started_at: string | null; finished_at: string | null;
+};
+
+export async function createRenderJob(projectId: string, request: RenderRequest) {
+  return apiRequest<RenderJob>(`/projects/${encodeURIComponent(projectId)}/renders`, { method: 'POST', body: JSON.stringify(request) });
+}
+
+export async function getRenderJob(id: string) {
+  return apiRequest<RenderJob>(`/renders/${encodeURIComponent(id)}`);
+}
+
+export async function listRenderJobs(projectId: string) {
+  return apiRequest<RenderJob[]>(`/renders?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export async function cancelRenderJob(id: string) {
+  return apiRequest<RenderJob>(`/renders/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+}
+
+export async function deleteRenderJob(id: string) {
+  return apiRequest<void>(`/renders/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function downloadRenderJob(id: string) {
+  const token = sessionStorage.getItem('frameforge:access-token');
+  const response = await fetch(`${API_BASE}/renders/${encodeURIComponent(id)}/download`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new ApiError(body?.detail ?? `Download failed (${response.status})`, response.status);
+  }
+  return response.blob();
+}

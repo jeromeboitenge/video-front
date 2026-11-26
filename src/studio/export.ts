@@ -1,3 +1,4 @@
+import fixWebmDuration from 'fix-webm-duration';
 import { getCloudMediaContent } from './api';
 import { effectStyle, type AppliedEffect, type ColorAdjustment } from './effects';
 import { clipOpacityAt, clipSourceTimeAt, clipTransformAt, clipVisualOpacityAt, layerType, MAX_CLIP_SPEED, MIN_CLIP_SPEED, textOverlayAnimationAt, type ImageLayer, type MediaAsset, type ProjectDocument, type TimelineClip, type Track } from './model';
@@ -511,7 +512,12 @@ export async function renderProjectVideo(
     recorder.stop();
     const blob = await completed;
     if (!blob.size) throw new Error('The browser produced an empty video export.');
-    return blob;
+    // MediaRecorder writes WebM without a duration header, so players cannot show length or seek; patch it in.
+    try {
+      return await fixWebmDuration(blob, plan.duration * 1000, { logger: false });
+    } catch {
+      return blob;
+    }
   } finally {
     if (recorder?.state === 'recording') recorder.stop();
     for (const media of mediaElements) {

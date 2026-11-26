@@ -145,6 +145,9 @@ test('a creator edits, saves, reopens and exports a project end to end', async (
   expect(imageInfo).toMatchObject({ kind: 'image', format: 'PNG', width: 540, height: 960 });
   expect(imageInfo.center).toEqual([0, 200, 83]); // the green ellipse shape layer is on top at the center
 
+  const gif = await serverRender(page, 'Animated GIF (no audio, ≤15 fps)', '0.25', 'story.gif');
+  expect(inspect(gif.path)).toMatchObject({ has_video: true, video_codec: 'gif', width: 270, height: 480 });
+
   const audio = await serverRender(page, 'Audio only · WAV', '1', 'mix.wav');
   expect(inspect(audio.path)).toMatchObject({ has_audio: true, has_video: false });
 

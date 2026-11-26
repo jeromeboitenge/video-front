@@ -12,3 +12,16 @@
 .export-progress .modal-secondary{grid-column:1/-1}
 .export-error{margin:14px 0 0;color:#ff9d9d;font-size:13px;line-height:1.5}
 .export-note{margin:18px 0 0;color:#85858e;font-size:11px;line-height:1.6}
+.server-export{margin-top:14px;padding:12px;border:1px solid #303137;border-radius:8px;background:#17181c;text-align:left}
+.server-export-head{display:flex;align-items:center;gap:7px;color:#e6e3ee;margin-bottom:10px}.server-export-head small{margin-left:auto;color:#85858d;font-size:9px}
+.server-export-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}.server-export-grid label{display:flex;flex-direction:column;gap:4px;color:#92919a;font-size:9px}
+.server-export-grid select{height:28px;padding:0 6px;border:1px solid #34353b;border-radius:4px;background:#111216;color:#e5e3e9;font-size:10px}
+.server-export-grid .server-export-check{flex-direction:row;align-items:center;gap:6px;align-self:end;height:28px}
+.server-export-jobs{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:6px;max-height:180px;overflow:auto}
+.server-export-job{display:grid;grid-template-columns:1fr auto;gap:5px;align-items:center;padding:7px 8px;border:1px solid #2c2d33;border-radius:6px;background:#1c1d22;font-size:10px;color:#ddd}
+.server-export-job>div:first-child{display:flex;gap:8px;align-items:center}.server-export-job>div:first-child span{color:#9a99a3}
+.server-export-job.completed>div:first-child span{color:#7fd8b6}.server-export-job.failed>div:first-child span{color:#ff9698}
+.server-export-job .export-progress-bar,.server-export-job .export-error{grid-column:1/-1}.server-export-job .export-error{margin:0;font-size:9px}
+.export-progress-bar{height:4px;border-radius:2px;background:#2b2c33;overflow:hidden}.export-progress-bar i{display:block;height:100%;background:#ad91f5;transition:width .3s}
+.server-export-actions{display:flex;gap:4px}.server-export-actions button{display:flex;align-items:center;gap:4px;padding:4px 7px;border:1px solid #3a3b42;border-radius:4px;background:#24252b;color:#e5e3e9;font-size:9px;cursor:pointer}
+.server-export-actions button:hover{background:#2f3038}

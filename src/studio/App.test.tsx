@@ -709,7 +709,7 @@ describe('editor media and timeline flow', () => {
 
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: 'Untitled story' }));
-    fireEvent.click(await screen.findByRole('button', { name: /Remote cut/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Remote cut/ }));
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Remote cut' })).toBeTruthy());
     const projectRequest = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/projects/cloud-project-1'));
@@ -838,7 +838,7 @@ describe('editor media and timeline flow', () => {
 
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: 'Untitled story' }));
-    fireEvent.click(await screen.findByRole('button', { name: /Cloud media cut/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Cloud media cut/ }));
     await waitFor(() => expect(document.querySelector('.asset-row')).not.toBeNull());
     fireEvent.click(document.querySelector('.asset-row')!);
 

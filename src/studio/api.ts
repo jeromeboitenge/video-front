@@ -178,9 +178,9 @@ export async function saveCloudProject(name: string, document: unknown, id?: str
   });
 }
 
-export type RenderKind = 'video' | 'image' | 'audio';
-export type RenderFormat = 'mp4' | 'webm' | 'png' | 'jpeg' | 'webp' | 'm4a' | 'wav';
-export type RenderRequest = { kind: RenderKind; format: RenderFormat; resolution?: number; quality?: 'high' | 'standard' | 'draft'; fps?: number; include_audio?: boolean; asset_id?: string; background?: 'transparent' | 'canvas' };
+export type RenderKind = 'video' | 'image' | 'frame' | 'audio';
+export type RenderFormat = 'mp4' | 'webm' | 'gif' | 'png' | 'jpeg' | 'webp' | 'm4a' | 'wav';
+export type RenderRequest = { kind: RenderKind; format: RenderFormat; resolution?: number; quality?: 'high' | 'standard' | 'draft'; fps?: number; include_audio?: boolean; asset_id?: string; background?: 'transparent' | 'canvas'; time?: number };
 export type RenderJob = {
   id: string; project_id: string; project_revision: number; kind: RenderKind; output_format: RenderFormat; options: Record<string, unknown>;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; progress: number; error: string | null;
